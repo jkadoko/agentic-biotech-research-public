@@ -1,12 +1,16 @@
-# Biotech-Analyzer v3.0 - System Architecture
+# Biotech-Analyzer v3.5 - System Architecture
+
+**Version:** 3.5r
+**Last Updated:** 2026-03-15
+**Aligned with:** PRD v3.5y, DATAFLOW.md v3.5p, CREWAI_TOOLS.md v2.0
 
 ## Overview
-Biotech-Analyzer v3.0 is a streamlined, AI-driven investment platform designed for maximum leverage and minimal complexity. It transitions from a complex, script-heavy desktop application to a containerized, web-based system powered by **CrewAI**, **Local Multi-Notebook RAG**, and **Streamlit**.
+Biotech-Analyzer v3.5 is a streamlined, AI-driven investment platform designed for maximum leverage and minimal complexity. It transitions from a complex, script-heavy desktop application to a containerized, web-based system powered by **CrewAI**, **ChromaDB (local vector store)**, and **Streamlit**.
 
 ## Core Philosophy: Maximum Leverage, Minimum Complexity
 The system leverages existing polished tools rather than reinventing the wheel:
-1. **Ollama:** Local GPU inference (2x Tesla P4s) for AI Agents (llama3.2, deepseek-r1).
-2. **Local Multi-Notebook RAG:** Self-hosted partitioned document retrieval system.
+1. **Ollama:** Local GPU inference (2x Tesla P4s) for AI Agents (llama3.1:8b, llama3.2:3b, deepseek-r1:7b-q4_K_M).
+2. **ChromaDB:** Self-hosted persistent vector store for semantic search over SEC filings, trial protocols, and agent memos.
 3. **CrewAI:** Orchestration framework for agentic workflows.
 4. **Streamlit:** Python-native web dashboard for visualizing data and agent outputs.
 5. **SQLite (WAL):** A robust, single-file database for transactional data.
@@ -15,9 +19,10 @@ The system leverages existing polished tools rather than reinventing the wheel:
 
 ### 1. Data Ingestion Layer
 *   **Purpose:** Fetching raw financial and clinical data.
-*   **Sources:** Hybrid financial data model balancing **E*TRADE** (requires frequent auth, highly reliable fresh data like live options chains) and **yfinance** (historical prices, stale EPS/fundamentals, rate-limited). Also uses ClinicalTrials.gov API v2 (trial pipeline), SEC EDGAR (10-K/10-Q/8-K/Form 4/13G/13D filings), FDA Orange Book (small molecule patent/exclusivity), and FDA Purple Book (biologics BLA/exclusivity).
-*   **Mechanism:** Python scripts executed by a Dockerized cron scheduler.
-*   **Storage:** Data is normalized and stored directly in `biotech_tracker.db` (SQLite). SEC filings and trial protocols are pushed to the Local Multi-Notebook RAG system.
+*   **Sources:** Hybrid financial data model balancing **E*TRADE** (requires frequent OAuth1 re-auth, highly reliable fresh data like live options chains; reference implementation in `scripts/EtradePythonClient/` — accounts, market quotes, order management) and **yfinance** (historical prices, stale EPS/fundamentals, rate-limited). Also uses ClinicalTrials.gov API v2 (real-time per-trial lookups), AACT CSV bulk download (6 tables, nightly), SEC EDGAR (10-K/10-Q/8-K/Form 4/13G/13D filings), FDA Orange Book (small molecule patent/exclusivity), FDA Purple Book (biologics BLA/exclusivity), and RSS feeds from 4 biotech news outlets (BioPharma Dive, Fierce Pharma, Endpoints News, STAT News — every 4h, no API key required).
+*   **Default Watchlist:** `data/companies.csv` — 1,391 pre-curated biotech/biopharma/medical device tickers (Symbol, Company Name) loaded at system startup. Scheduler queues bulk onboarding via `onboard_company.py` for each `PENDING` ticker; `data/gbd_2019_clean.csv` provides GBD 2019 prevalence data for Scout's Tier 2 disease context fallback; `data/endpoint_synonyms.csv` normalizes free-text AACT endpoint strings for Peer Reviewer analysis (REQ-075).
+*   **Mechanism:** Python scripts executed by a Dockerized APScheduler. `fetch_news.py` runs every 4h independently. Nightly scripts: `fetch_market_data.py`, `fetch_aact_csvs.py`, `fetch_sec_filings.py`, `fetch_options.py`, `fetch_clinical_trials.py` (on-demand CT.gov API v2 wrapper for agents). Weekly: `fetch_fda_data.py` (PDUFA calendar + orphan DB refresh). Onboarding runs on-demand via `onboard_company.py`.
+*   **Storage:** Data is normalized and stored directly in `biotech_tracker.db` (SQLite WAL). SEC filings and trial protocols are embedded into ChromaDB (local vector store) for semantic search.
 
 ### 2. The Agent Council (CrewAI)
 *   **Purpose:** Analyzing the raw data to extract actionable investment intelligence.
@@ -29,7 +34,7 @@ The system leverages existing polished tools rather than reinventing the wheel:
 
 ### 3. Knowledge Base (ChromaDB Local RAG)
 *   **Purpose:** Semantic search, historical context, and deep document analysis without cloud dependencies.
-*   **Integration:** Utilizes CrewAI's `RagTool` configured with ChromaDB as the persistent local vector store. Embeddings are generated locally (e.g., via Ollama or BAAI). This architecture completely bypasses arbitrary word/size limits associated with notebook UI wrappers.
+*   **Integration:** Agents access ChromaDB via the shared `LocalRAGTool` class defined in CREWAI_TOOLS.md. Collections: `sec_filings` (10-K/10-Q/8-K text), `trial_protocols` (Phase 2/3 study protocols), `agent_memos` (historical investment memos for Strategist longitudinal context). Embeddings are generated locally via Ollama using `mxbai-embed-large:latest`. ChromaDB collections are initialized with `OllamaEmbeddingFunction(model="mxbai-embed-large:latest", url=OLLAMA_HOST)` — this model must be pulled on the Ollama instance before first use. This architecture completely bypasses arbitrary word/size limits associated with notebook UI wrappers.
 *   **Workflow:** When the Strategist Agent needs to know "What were the partnership terms for similar-stage biotech companies in 2023?", it queries ChromaDB via the RAG tool instead of executing complex SQL joins.
 
 ### 4. User Interface (Streamlit)
@@ -38,7 +43,8 @@ The system leverages existing polished tools rather than reinventing the wheel:
     *   Portfolio Dashboard (Performance, Sharpe Ratio, Drawdown).
     *   Holdings Table and Active Signals.
     *   Interactive Agent Reports (Click a ticker to see the Strategist's memo).
-    *   Direct natural language queries to Local Multi-Notebook RAG.
+    *   Direct natural language queries to ChromaDB (select collection: `sec_filings`, `agent_memos`, `trial_protocols`).
+    *   News Feed — latest `news_articles` with category filter (m&a, fda, conference, partnership, analyst).
 
 ## Architecture Diagram (Logical Flow)
 
@@ -52,17 +58,19 @@ flowchart TD
         FDA["FDA Orphan Drug DB and PDUFA Calendar"]
         OB["FDA Orange Book\n(small molecules)"]
         PB["FDA Purple Book\n(biologics)"]
+        RSS["RSS Feeds\nBioPharma Dive · Fierce Pharma\nEndpoints · STAT News\n(every 4h)"]
     end
 
     subgraph ingest["Data Ingestion (Scheduler + On-Demand)"]
         IngestScripts["Python Fetchers\n(nightly batch)"]
-        SyncLocalRAG["Local Vector Ingestion"]
-        Onboard["onboard_company.py\n(ticker-first onboarding)"]
+        NewsFetcher["fetch_news.py\n(every 4h)"]
+        SyncLocalRAG["sync_local_rag.py\n(weekly — agent memos/audits → ChromaDB)"]
+        Onboard["onboard_company.py\n(ticker-first onboarding\n10-K → ChromaDB embed direct)"]
     end
 
     subgraph storage["Storage"]
         DB[("SQLite WAL")]
-        NLM[("Local Multi-Notebook RAG\nKnowledge Base")]
+        ChromaDB[("ChromaDB\nLocal Vector Store")]
     end
 
     subgraph crews["Agent Orchestration (CrewAI)"]
@@ -76,6 +84,8 @@ flowchart TD
         UI["Streamlit Web App"]
     end
 
+    RSS --> NewsFetcher
+    NewsFetcher --> DB
     SEC & CTv2 & AACT & MKT & FDA --> IngestScripts
     %% Onboarding pipeline: ticker → 10-K → ChromaDB embed → LLM extract → SQLite upsert → trial linkage via drug names/NCT IDs/company name
     SEC --> Onboard
@@ -83,17 +93,18 @@ flowchart TD
     OB & PB --> Onboard
 
     IngestScripts --> DB
-    IngestScripts --> SyncLocalRAG
     Onboard --> DB
-    Onboard --> SyncLocalRAG
-    SyncLocalRAG --> NLM
+    Onboard --> ChromaDB
+    DB --> SyncLocalRAG
+    SyncLocalRAG --> ChromaDB
 
     DB <--> DataCrew
     DB <--> AnalysisCrew
     DB <--> StrategyCrew
 
-    NLM <--> AnalysisCrew
-    NLM <--> StrategyCrew
+    ChromaDB <--> DataCrew
+    ChromaDB <--> AnalysisCrew
+    ChromaDB <--> StrategyCrew
 
     Ollama <--> DataCrew
     Ollama <--> AnalysisCrew
@@ -134,12 +145,14 @@ New Ticker (user entry or Scout Task D post-IPO)
          company_onboarding_log (audit record)
     │
     ▼
-[Step 6] Link clinical trials — three-pass approach
+[Step 6] Link clinical trials — four-pass approach
          Pass 1: NCT IDs cited verbatim in 10-K → direct CT.gov lookup (10K_CITED)
          Pass 2: Drug name search → CT.gov /api/v2/studies?query.term={drug_name} (DRUG_NAME_MATCH)
          Pass 3: Company name → CT.gov search by sponsor OR collaborator name (COMPANY_NAME_MATCH)
                  (captures trials where company is an industry collaborator, e.g., in a partnership)
-         Priority: 10K_CITED > DRUG_NAME_MATCH > COMPANY_NAME_MATCH
+         Pass 4: Detective entity_aliases lookup → resolved ticker → link all trials for that sponsor (ENTITY_RESOLVED)
+                 (catches subsidiary/acquisition cases where sponsor name ≠ public company name)
+         Priority: 10K_CITED > DRUG_NAME_MATCH > COMPANY_NAME_MATCH > ENTITY_RESOLVED
     │
     ▼
 [Step 7] Drug database lookups
@@ -158,7 +171,7 @@ New Ticker (user entry or Scout Task D post-IPO)
 - `fetch_sec_filings.py` detects new 10-K filing → sets `onboarding_status = STALE` for that ticker
 
 ## Deployment (Docker Compose)
-The entire stack is orchestrated via a single `docker-compose.yml` file, ensuring identical environments between development (Google Antigravity IDE) and production (Dell R730 server).
+The entire stack is orchestrated via a single `docker-compose.yml` file, ensuring identical environments between development and production (Dell R730 server).
 
 *   **biotech-app:** Runs the Streamlit UI and exposes port 8501.
 *   **ollama-gpu0 / ollama-gpu1:** Two dedicated instances managing model inference across the two Tesla P4s.

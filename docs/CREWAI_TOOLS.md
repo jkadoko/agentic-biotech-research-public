@@ -1,6 +1,8 @@
 # CrewAI Shared Tools Catalog
 
-**Version:** 1.0
+**Version:** 2.1
+**Last Updated:** 2026-03-15
+**Aligned with:** PRD v3.5y
 **Purpose:** Documents every shared tool available to CrewAI agents. Each tool is a Python class that implements the CrewAI `BaseTool` interface. Agents declare which tools they use in their `tools` list parameter.
 
 ---
@@ -29,7 +31,7 @@ class MyTool(BaseTool):
 Tools are instantiated once and passed to agents:
 ```python
 db_tool = DatabaseQueryTool(db_path="biotech_tracker.db")
-agent = Agent(role="Detective", tools=[db_tool, google_search_tool])
+agent = Agent(role="Detective", tools=[db_tool, web_search_tool])
 ```
 
 ---
@@ -38,20 +40,21 @@ agent = Agent(role="Detective", tools=[db_tool, google_search_tool])
 
 | Tool Name | File | Used By Agents | Purpose |
 |---|---|---|---|
-| `DatabaseQueryTool` | `tools/db_tool.py` | All agents | Read from SQLite |
-| `DatabaseWriteTool` | `tools/db_tool.py` | All agents (write) | Write/upsert to SQLite |
-| `LocalRAGTool` | `tools/local_rag_tool.py` | 003, 004, 005, 006, 008, 010, 011 | Semantic search over partitioned notebooks |
-| `SECEdgarFetcherTool` | `tools/sec_edgar_tool.py` | 005, 011 | Fetch Form 4, 13G/13D filings from EDGAR |
-| `ClinicalTrialsTool` | `tools/clinicaltrials_tool.py` | 001, 003, 004, 008, 010 | Query ClinicalTrials.gov API v2 |
-| `GoogleSearchTool` | `tools/search_tool.py` | 001, 002, 003, 008 | Web search via Local model/Google Search API |
-| `OptionsChainTool` | `tools/options_tool.py` | 009 | Fetch live options chain from E*TRADE |
-| `OllamaLLMTool` | `tools/ollama_tool.py` | 006 (Strategist), 010 (Partnership) | Run local LLM inference via Ollama |
+| `DatabaseQueryTool` | `src/tools/db_tool.py` | All agents | Read from SQLite (includes `news_articles`) |
+| `DatabaseWriteTool` | `src/tools/db_tool.py` | All agents (write) | REQ-004-compliant upsert to SQLite (never overwrites non-NULL with NULL) |
+| `DatabasePatchTool` | `src/tools/db_tool.py` | 002 Scout | Partial JSON column update (e.g., append to `watchlist_flags`) without touching other columns |
+| `LocalRAGTool` | `src/tools/local_rag_tool.py` | 002, 003, 004, 005, 006, 008, 009, 010, 011 | Semantic search over ChromaDB collections |
+| `SECEdgarFetcherTool` | `src/tools/sec_edgar_tool.py` | 005, 011 | Fetch Form 4, 13G/13D filings from EDGAR |
+| `ClinicalTrialsTool` | `src/tools/clinicaltrials_tool.py` | 001, 002, 003, 004, 008, 010 | Query ClinicalTrials.gov API v2 |
+| `DuckDuckGoSearchTool` | `src/tools/search_tool.py` | 001, 002, 003, 004, 008 | Web search via DuckDuckGo (no API key required) |
+| `OptionsChainTool` | `src/tools/options_tool.py` | 009 | Fetch live options chain from E*TRADE |
+| `OllamaLLMTool` | `src/tools/ollama_tool.py` | 006 (Strategist), 010 (Partnership) | Run local LLM inference via Ollama |
 
 ---
 
 ## 1. DatabaseQueryTool
 
-**File:** `tools/db_tool.py`
+**File:** `src/tools/db_tool.py`
 **Used By:** All agents
 **Purpose:** Execute read-only SQL queries against the SQLite database.
 
@@ -66,7 +69,9 @@ class DatabaseQueryTool(BaseTool):
         "Tables: companies, trial_pipeline, studies, conditions, catalysts, "
         "entity_aliases, disease_context, partnerships, agent_profiler_findings, "
         "agent_scientific_audits, agent_insider_findings, agent_volatility_findings, "
-        "agent_smart_money_findings, agent_investment_memos, options_chains, orphan."
+        "agent_smart_money_findings, smart_money_positions, agent_investment_memos, "
+        "options_chains, orphan, news_articles, sec_filings, interventions, "
+        "collaborators, design_outcomes, company_onboarding_log, historical_prices."
     )
     args_schema: type[BaseModel] = DatabaseQueryInput
     db_path: str = "biotech_tracker.db"
@@ -102,74 +107,214 @@ WHERE st.status = 'ACTIVE_NOT_RECRUITING' AND st.phase = 'PHASE3'
 
 ## 2. DatabaseWriteTool
 
-**File:** `tools/db_tool.py`
+**File:** `src/tools/db_tool.py`
 **Used By:** All agents (for writing output)
-**Purpose:** Upsert agent findings to SQLite. Wraps a parameterized INSERT OR REPLACE.
+**Purpose:** REQ-004-compliant upsert to SQLite. `None` values in `data` are **never written** — existing non-NULL column values are always preserved. Uses SQLite's `ON CONFLICT DO UPDATE` with a `CASE WHEN excluded.col IS NOT NULL` guard for each non-PK column.
+
+**⚠️ REQ-004 Compliance Note:** The previous `INSERT OR REPLACE` implementation violated REQ-004 — it deleted and re-inserted the full row, wiping any columns not present in `data`. This version uses a conditional ON CONFLICT upsert so that NULL incoming values never overwrite existing data.
 
 ```python
 class DatabaseWriteInput(BaseModel):
     table: str = Field(description="Target table name")
-    data: dict = Field(description="Dictionary of column->value pairs to upsert")
+    data: dict = Field(description="Dictionary of column->value pairs to upsert. "
+                                   "None/null values are ignored — will NOT overwrite existing non-NULL data (REQ-004).")
+
+# Primary key column(s) per table. Required to build the ON CONFLICT clause.
+# MUST match SCHEMA.md exactly — SQLite's ON CONFLICT clause uses the actual PK constraint.
+# Composite PKs are expressed as a list. All values must be present in the data dict.
+PRIMARY_KEY_MAP: dict = {
+    # SCHEMA.md Section 3: Entity Resolution
+    "entity_aliases":             ["alias"],                             # PK: alias TEXT
+    # SCHEMA.md Section 4: Disease Epidemiology
+    "disease_context":            ["condition_normalized"],              # PK: condition_normalized TEXT
+    # SCHEMA.md Section 2: Clinical Trials (Linkage)
+    "trial_pipeline":             ["ticker", "nct_id"],                  # PK: (ticker, nct_id)
+    # SCHEMA.md Section 8: Agent Output Tables
+    "agent_profiler_findings":    ["ticker", "profile_date"],            # PK: (ticker, profile_date)
+    "agent_scientific_audits":    ["ticker", "nct_id", "audit_date"],    # PK: (ticker, nct_id, audit_date)
+    "agent_insider_findings":     ["ticker", "scan_date"],               # PK: (ticker, scan_date)
+    "catalysts":                  ["ticker", "event_type", "event_date"],# PK: (ticker, event_type, event_date)
+    "agent_volatility_findings":  ["ticker", "scan_date"],               # PK: (ticker, scan_date)
+    "partnerships":               ["ticker", "partner_name", "drug_asset"],# PK: (ticker, partner_name, drug_asset)
+    "agent_smart_money_findings": ["ticker", "scan_date"],               # PK: (ticker, scan_date)
+    "agent_investment_memos":     ["ticker", "memo_date"],               # PK: (ticker, memo_date)
+    # SCHEMA.md Section 1: Core Reference
+    "companies":                  ["ticker"],                            # PK: ticker TEXT
+    # SCHEMA.md Section 8: Agent Output Tables (cont.)
+    "smart_money_positions":      ["ticker", "institution_name", "filing_date"],  # PK: (ticker, institution_name, filing_date)
+    # SCHEMA.md Section 9: News
+    "news_articles":              ["id"],                                # PK: id INTEGER (auto-increment)
+}
 
 class DatabaseWriteTool(BaseTool):
     name: str = "database_write"
-    description: str = "Upsert a record into a database table. Provide table name and data dict."
+    description: str = (
+        "REQ-004-compliant upsert: write agent findings to a database table. "
+        "NULL/None values in data dict are NEVER written — existing non-NULL values are preserved. "
+        "The primary key column(s) must be included in the data dict."
+    )
     args_schema: type[BaseModel] = DatabaseWriteInput
+    db_path: str = "biotech_tracker.db"
 
     def _run(self, table: str, data: dict) -> str:
         import sqlite3
-        # Whitelist tables to prevent injection
-        ALLOWED_TABLES = {
-            "entity_aliases", "disease_context", "agent_profiler_findings",
-            "agent_scientific_audits", "agent_insider_findings", "catalysts",
-            "agent_volatility_findings", "partnerships", "agent_smart_money_findings",
-            "agent_investment_memos", "companies"
-        }
-        if table not in ALLOWED_TABLES:
+        if table not in PRIMARY_KEY_MAP:
             return f"Error: Table '{table}' is not in the allowed write list."
-        cols = ", ".join(data.keys())
-        placeholders = ", ".join(["?"] * len(data))
-        sql = f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({placeholders})"
+
+        pk_cols = PRIMARY_KEY_MAP[table]
+        for pk in pk_cols:
+            if pk not in data:
+                return f"Error: Primary key column '{pk}' must be present in data dict."
+
+        # REQ-004: strip None values — never overwrite existing data with NULL
+        clean_data = {k: v for k, v in data.items() if v is not None}
+        if not clean_data:
+            return "Warning: No non-null values to write."
+
+        cols = ", ".join(clean_data.keys())
+        placeholders = ", ".join(["?"] * len(clean_data))
+        conflict_target = ", ".join(pk_cols)
+
+        # For non-PK columns: only overwrite if the incoming value is not NULL
+        non_pk_cols = [k for k in clean_data if k not in pk_cols]
+        if non_pk_cols:
+            set_clause = ", ".join(
+                [f"{c} = CASE WHEN excluded.{c} IS NOT NULL THEN excluded.{c} ELSE {table}.{c} END"
+                 for c in non_pk_cols]
+            )
+            sql = (f"INSERT INTO {table} ({cols}) VALUES ({placeholders}) "
+                   f"ON CONFLICT({conflict_target}) DO UPDATE SET {set_clause}")
+        else:
+            # Only PK columns provided — insert new row if not exists, no-op if exists
+            sql = f"INSERT OR IGNORE INTO {table} ({cols}) VALUES ({placeholders})"
+
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute(sql, list(data.values()))
+            conn.execute(sql, list(clean_data.values()))
             conn.commit()
-        return f"OK: Upserted 1 row into {table}"
+        return f"OK: Upserted 1 row into {table} (pk={[data[p] for p in pk_cols]}, {len(non_pk_cols)} data columns written)"
+```
+
+---
+
+## 2b. DatabasePatchTool
+
+**File:** `src/tools/db_tool.py`
+**Used By:** Agent 002 (Scout — Task E M&A news flags)
+**Purpose:** Perform a **partial update** to a single JSON column on an existing row without touching any other columns. Required for Scout Task E's `json_insert` pattern on `companies.watchlist_flags`. `DatabaseWriteTool` cannot safely do this because it must receive the full row to avoid losing data; `DatabasePatchTool` issues a targeted `UPDATE … SET json_col = json_insert(…)` directly.
+
+```python
+class DatabasePatchInput(BaseModel):
+    table: str = Field(description="Target table (must be in PATCH_ALLOWED_TABLES)")
+    pk_column: str = Field(description="Primary key column name (e.g., 'ticker')")
+    pk_value: str = Field(description="Primary key value identifying the row to patch")
+    json_column: str = Field(description="Name of the JSON column to patch (e.g., 'watchlist_flags')")
+    operation: str = Field(
+        description="JSON operation to perform. Options: "
+                    "'append' — appends value_dict as a new element to a JSON array; "
+                    "'set_key' — sets a top-level key in a JSON object to value_dict."
+    )
+    value_dict: dict = Field(description="Dict to append (for 'append') or {key: value} to set (for 'set_key')")
+
+PATCH_ALLOWED_TABLES = {"companies"}
+
+class DatabasePatchTool(BaseTool):
+    name: str = "database_patch_json"
+    description: str = (
+        "Perform a targeted JSON column patch on a single row. "
+        "Use to append a flag object to companies.watchlist_flags (Scout Task E M&A signals) "
+        "without touching price, runway, or any other company column. REQ-004 safe."
+    )
+    args_schema: type[BaseModel] = DatabasePatchInput
+    db_path: str = "biotech_tracker.db"
+
+    def _run(self, table: str, pk_column: str, pk_value: str,
+             json_column: str, operation: str, value_dict: dict) -> str:
+        import sqlite3, json
+        if table not in PATCH_ALLOWED_TABLES:
+            return f"Error: Table '{table}' is not in the patch-allowed list."
+        if operation not in ("append", "set_key"):
+            return f"Error: operation must be 'append' or 'set_key'."
+        value_json = json.dumps(value_dict)
+        with sqlite3.connect(self.db_path) as conn:
+            if operation == "append":
+                # Append value_dict to the JSON array, initializing to [] if NULL
+                sql = (f"UPDATE {table} SET {json_column} = "
+                       f"json_insert(COALESCE({json_column}, '[]'), '$[#]', json(?)) "
+                       f"WHERE {pk_column} = ?")
+            else:  # set_key
+                key = list(value_dict.keys())[0]
+                val = list(value_dict.values())[0]
+                sql = (f"UPDATE {table} SET {json_column} = "
+                       f"json_set(COALESCE({json_column}, '{{}}'), '$.{key}', ?) "
+                       f"WHERE {pk_column} = ?")
+                value_json = json.dumps(val)
+            conn.execute(sql, [value_json, pk_value])
+            conn.commit()
+        return f"OK: Patched {table}.{json_column} for {pk_column}={pk_value} (op={operation})"
+```
+
+**Usage by Scout Task E:**
+```python
+# Step 3: Write M&A rumor flag to companies.watchlist_flags
+patch_tool._run(
+    table="companies",
+    pk_column="ticker",
+    pk_value="MRNA",
+    json_column="watchlist_flags",
+    operation="append",
+    value_dict={
+        "flag": "MA_RUMOR",
+        "direction": "TARGET",
+        "headline": "Pfizer rumored to be eyeing Moderna acquisition",
+        "source": "BioPharma Dive",
+        "detected_at": "2026-03-14T08:30:00"
+    }
+)
 ```
 
 ---
 
 ## 3. LocalRAGTool
 
-**File:** `tools/local_rag_tool.py`
-**Used By:** Agents 003, 004, 005, 006, 008, 010, 011
-**Purpose:** Query the Local Multi-Notebook RAG knowledge base (containing all SEC filings, trial protocols, and prior agent memos) using natural language.
+**File:** `src/tools/local_rag_tool.py`
+**Used By:** Agents 002, 003, 004, 005, 006, 008, 009, 010, 011
+**Purpose:** Semantic search over ChromaDB local vector store. Collections: `sec_filings`, `trial_protocols`, `agent_memos`. Embeddings generated locally via `mxbai-embed-large:latest` (Ollama). Collections must be initialized with `OllamaEmbeddingFunction(model="mxbai-embed-large:latest", url=OLLAMA_HOST)` before first use — see `scripts/init_chromadb.py`. No word/size limits — ChromaDB handles unlimited documents.
 
 ```python
 class LocalRAGQueryInput(BaseModel):
     query: str = Field(
-        description="Natural language question to ask the Local RAG knowledge base. "
-                    "The KB is partitioned into multiple notebooks. "
-                    "Contains: 10-K/10-Q SEC filings, 8-K event filings, prior memos, "
-                    "and scientific audit reports. "
+        description="Natural language question to ask the ChromaDB knowledge base. "
+                    "Contains: 10-K/10-Q SEC filings, 8-K event filings, prior investment memos, "
+                    "scientific audit reports, and trial protocols. "
                     "Example: 'What are the key patent risks in MRNA latest 10-K?'"
     )
-    notebook_category: str = Field(description="The partition to query (e.g., Notebook_SEC_Filings)")
+    collection: str = Field(
+        description="ChromaDB collection to query. Options: 'sec_filings', 'agent_memos', "
+                    "'trial_protocols', or a therapeutic area (e.g., 'oncology', 'neurology'). "
+                    "Use 'sec_filings' for 10-K/8-K/Form4. Use 'agent_memos' for historical recommendations."
+    )
     ticker: str = Field(default=None, description="Optional: scope the search to a specific ticker")
 
 class LocalRAGTool(BaseTool):
     name: str = "local_rag_query"
     description: str = (
-        "Query the Local Multi-Notebook RAG semantic knowledge base containing SEC filings and prior agent memos. "
-        "Must specify the notebook_category to respect 500k words / 200MB limits per notebook."
+        "Semantic search over the ChromaDB local knowledge base containing SEC filings, "
+        "trial protocols, and prior agent memos. Specify the collection to search. "
+        "Use for complex queries that SQL cannot answer: 'Find similar Phase 3 CAR-T failures in DLBCL', "
+        "'What were partnership terms in comparable oncology deals?'"
     )
     args_schema: type[BaseModel] = LocalRAGQueryInput
-    local_rag_client: object = None  # Injected Local RAG client
+    chroma_client: object = None  # Injected ChromaDB PersistentClient
 
-    def _run(self, query: str, notebook_category: str, ticker: str = None) -> str:
+    def _run(self, query: str, collection: str, ticker: str = None) -> str:
+        import json
         scoped_query = f"[{ticker}] {query}" if ticker else query
-        response = self.local_rag_client.query(scoped_query, notebook=notebook_category)
-        # response contains cited passages with source references
-        return response.text  # Returns cited answer as string
+        coll = self.chroma_client.get_collection(collection)
+        results = coll.query(query_texts=[scoped_query], n_results=5)
+        # Returns top-5 document chunks with metadata (source, ticker, filing_date)
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        return json.dumps([{"text": d, "source": m} for d, m in zip(docs, metas)])
 ```
 
 **Critical queries by agent:**
@@ -193,7 +338,7 @@ class LocalRAGTool(BaseTool):
 
 ## 4. SECEdgarFetcherTool
 
-**File:** `tools/sec_edgar_tool.py`
+**File:** `src/tools/sec_edgar_tool.py`
 **Used By:** Agents 005 (Form 4), 011 (13G/13D)
 **Purpose:** Fetch raw filing text from SEC EDGAR API. Handles rate limiting and User-Agent headers.
 
@@ -240,8 +385,8 @@ class SECEdgarFetcherTool(BaseTool):
 
 ## 5. ClinicalTrialsTool
 
-**File:** `tools/clinicaltrials_tool.py`
-**Used By:** Agents 001, 003, 004, 008, 010
+**File:** `src/tools/clinicaltrials_tool.py`
+**Used By:** Agents 001, 002, 003, 004, 008, 010
 **Purpose:** Query ClinicalTrials.gov API v2 for trial data.
 
 ```python
@@ -298,44 +443,43 @@ class ClinicalTrialsTool(BaseTool):
 
 ---
 
-## 6. GoogleSearchTool
+## 6. DuckDuckGoSearchTool
 
-**File:** `tools/search_tool.py`
-**Used By:** Agents 001, 002, 003, 008
-**Purpose:** Execute web searches via Google Programmable Search API or Local model's built-in search capability.
+**File:** `src/tools/search_tool.py`
+**Used By:** Agents 001, 002, 003, 004, 008
+**Purpose:** Execute web searches via DuckDuckGo. No API key or account required. Local Ollama models have no internet access — this tool is required for all real-time web lookups.
 
 ```python
-class GoogleSearchInput(BaseModel):
+class DuckDuckGoSearchInput(BaseModel):
     query: str = Field(description="Search query string. Be specific. Include company names, drug names, and dates.")
     num_results: int = Field(default=5, description="Number of search results to return (max 10)")
 
-class GoogleSearchTool(BaseTool):
-    name: str = "google_search"
+class DuckDuckGoSearchTool(BaseTool):
+    name: str = "web_search"
     description: str = (
         "Search the web for current information about biotech companies, FDA decisions, "
         "clinical trial results, acquisitions, and PDUFA dates. "
-        "Returns titles, URLs, and snippets from top results."
+        "Returns titles, URLs, and snippets from top results. No API key required."
     )
-    args_schema: type[BaseModel] = GoogleSearchInput
-    api_key: str  # Google Custom Search API key or Local model API key
-    cse_id: str   # Custom Search Engine ID (for Google CSE) or None for Local model
+    args_schema: type[BaseModel] = DuckDuckGoSearchInput
 
     def _run(self, query: str, num_results: int = 5) -> str:
-        import requests, json
-        params = {"key": self.api_key, "cx": self.cse_id, "q": query, "num": num_results}
-        resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params)
-        items = resp.json().get("items", [])
-        results = [{"title": i["title"], "url": i["link"], "snippet": i["snippet"]} for i in items]
+        import json
+        from duckduckgo_search import DDGS
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=min(num_results, 10)):
+                results.append({"title": r.get("title"), "url": r.get("href"), "snippet": r.get("body")})
         return json.dumps(results)
 ```
 
-**Note for Local model-native agents (001, 002, 003, 008):** When using `llama3.1:8b` with search enabled via Vertex AI, this tool is often unnecessary — Local model's native grounding tool handles search inline. Use this tool only when the agent model is a local Ollama model without internet access.
+**Note:** All agents run on local Ollama models (100% local inference). Local models have no native internet access, so `DuckDuckGoSearchTool` is required for all real-time web lookups. No credentials needed — `duckduckgo-search` (`pip install duckduckgo-search`) is the only dependency.
 
 ---
 
 ## 7. OptionsChainTool
 
-**File:** `tools/options_tool.py`
+**File:** `src/tools/options_tool.py`
 **Used By:** Agent 009 (Volatility)
 **Purpose:** Fetch live options chain data from E*TRADE API for a given ticker.
 
@@ -379,13 +523,15 @@ class OptionsChainTool(BaseTool):
         return json.dumps(results)
 ```
 
+**E*TRADE Auth Reference:** `scripts/EtradePythonClient/` is the official OAuth1 reference client for E*TRADE. It demonstrates the full auth flow (`rauth.OAuth1Service` → request token → browser authorize → access token → authenticated session) and exposes `Accounts` (account list, portfolio, balance), `Market` (live quotes), and `Order` (preview, view, cancel) modules. `config.ini` in that directory holds `CONSUMER_KEY` and `CONSUMER_SECRET`. Use this as the auth pattern when implementing `ingestion/fetch_options.py`.
+
 **⚠️ E*TRADE Deprecation Note:** E*TRADE API is being migrated to Morgan Stanley API. Until migration completes, the `yfinance` fallback provides free options data but lacks real-time bid/ask precision. For production, subscribe to CBOE DataShop or use Interactive Brokers TWS API.
 
 ---
 
 ## 8. OllamaLLMTool
 
-**File:** `tools/ollama_tool.py`
+**File:** `src/tools/ollama_tool.py`
 **Used By:** Agents 006 (Strategist), 010 (Partnership NLP extraction)
 **Purpose:** Run local LLM inference via Ollama for privacy-sensitive tasks (investment memos must stay local) and structured NLP extraction from SEC filings.
 
@@ -419,27 +565,31 @@ class OllamaLLMTool(BaseTool):
 **VRAM Notes (Tesla P4, 8GB each):**
 | Model | VRAM Required | Use Case |
 |---|---|---|
-| `deepseek-r1:7b-q4_K_M` | ~4.5 GB | Strategist reasoning chains |
-| `llama3.2:3b` | ~2.0 GB | Partnership NLP extraction |
+| `llama3.1:8b` | ~5.5 GB | Primary model: onboarding 10-K extraction, most agent tasks |
+| `deepseek-r1:7b-q4_K_M` | ~4.5 GB | Strategist reasoning chains (q4 quantized) |
+| `llama3.2:3b` | ~2.0 GB | Low-latency: Partnership NLP extraction, Volatility |
 | `deepseek-r1:7b-q4_K_M` + `llama3.2:3b` simultaneously | ~6.5 GB | Fits on single P4 |
-| `deepseek-r1:70b` | ~40+ GB | NOT FEASIBLE on P4 |
+| `llama3.1:8b` | ~5.5 GB | Runs on GPU1 while GPU0 runs deepseek-r1 |
+| `deepseek-r1:70b` | ~40+ GB | NOT FEASIBLE on P4 — do not attempt |
 
 ---
 
 ## 9. Agent-Tool Assignment Matrix
 
-| Agent | DB Read | DB Write | Local Multi-Notebook RAG | SEC EDGAR | ClinicalTrials | Google Search | Options | Ollama |
-|---|---|---|---|---|---|---|---|---|
-| 001 Detective | ✓ | ✓ | | | ✓ | ✓ | | |
-| 002 Scout | ✓ | ✓ | | | ✓ | ✓ | | |
-| 003 Profiler | ✓ | ✓ | ✓ | | ✓ | ✓ | | |
-| 004 Peer Reviewer | ✓ | ✓ | ✓ | | ✓ | | | |
-| 005 Insider | ✓ | ✓ | ✓ | ✓ | | | | |
-| 006 Strategist | ✓ | ✓ | ✓ | | | | | ✓ |
-| 008 Oracle | ✓ | ✓ | ✓ | | ✓ | ✓ | | |
-| 009 Volatility | ✓ | ✓ | | | | | ✓ | |
-| 010 Partnership | ✓ | ✓ | ✓ | | ✓ | | | ✓ |
-| 011 Smart Money | ✓ | ✓ | ✓ | ✓ | | | | |
+`news_articles` is accessed via `DatabaseQueryTool` — agents that use news are marked in the News column.
+
+| Agent | DB Read | DB Write | DB Patch (JSON) | ChromaDB RAG | SEC EDGAR | ClinicalTrials | Google Search | Options | Ollama | News (via DB) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 001 Detective | ✓ | ✓ | | | | ✓ | ✓ | | | |
+| 002 Scout | ✓ | ✓ | ✓ (Task E) | ✓ | | ✓ | ✓ | | | ✓ |
+| 003 Profiler | ✓ | ✓ | | ✓ | | ✓ | ✓ | | | |
+| 004 Peer Reviewer | ✓ | ✓ | | ✓ | | ✓ | ✓ | | | |
+| 005 Insider | ✓ | ✓ | | ✓ | ✓ | | | | | |
+| 006 Strategist | ✓ | ✓ | | ✓ | | | | | ✓ | |
+| 008 Oracle | ✓ | ✓ | | ✓ | | ✓ | ✓ | | | ✓ |
+| 009 Volatility | ✓ | ✓ | | ✓ | | | | ✓ | | |
+| 010 Partnership | ✓ | ✓ | | ✓ | | ✓ | | | ✓ | ✓ |
+| 011 Smart Money | ✓ | ✓ | | ✓ | ✓ | | | | | ✓ |
 
 ---
 

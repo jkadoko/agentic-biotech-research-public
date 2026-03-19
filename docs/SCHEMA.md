@@ -1,12 +1,13 @@
 # Biotech Investment Analyzer — Database Schema & Variable Reference
 
-**Version:** 3.4
-**Last Updated:** 2026-03-14
+**Version:** 3.5s
+**Last Updated:** 2026-03-15
+**Aligned with:** PRD v3.5y, CREWAI_TOOLS.md v2.0
 **Supersedes:** SCHEMA.md v16.5 (legacy 23-agent schema)
 
 All tables reside in a single SQLite WAL-mode database: `biotech_tracker.db`.
 This document is the authoritative variable reference for all agents, ingestion scripts, and the Streamlit UI.
-The canonical SQL definitions live in `db/models.py` (SQLModel).
+The canonical SQL definitions live in `src/db/models.py` (SQLModel).
 
 ---
 
@@ -48,6 +49,7 @@ The canonical SQL definitions live in `db/models.py` (SQLModel).
 | `is_active` | BOOLEAN DEFAULT 1 | Admin | **REQ-071:** 0 for delisted/inactive tickers; all ingestion scripts filter `WHERE is_active = 1` |
 | `last_10k_parsed` | DATE | Onboarding pipeline | Date of most recent 10-K extraction run |
 | `onboarding_status` | TEXT | Onboarding pipeline | `PENDING` / `COMPLETE` / `FAILED` / `STALE` (triggered when new 10-K detected via RSS) |
+| `watchlist_flags` | JSON | Scout Task E / System | Array of active alert objects (e.g., `MA_RUMOR_FLAG`). Each entry: `{flag, source, headline, source_url, detected_at}`. Scout Task E writes here; entries auto-expire after 30 days if no confirming 8-K found. Displayed in Streamlit as amber alert badges. |
 | `last_updated` | TIMESTAMP | System | Timestamp of most recent row update |
 
 **Derived / not stored** (computed at query time): `negative_ev = (total_cash_usd > market_cap_usd + total_debt_usd)`
@@ -145,6 +147,17 @@ The canonical SQL definitions live in `db/models.py` (SQLModel).
 
 ---
 
+### `sponsors` — AACT Sponsors (Denormalized into `studies`)
+
+**Note:** The AACT `sponsors.txt` file (one of the 6 ingested tables) is NOT stored as a separate SQLite table. Its data is denormalized at ingest time:
+- Lead sponsor rows (`lead_or_collaborator = 'lead'`) update `studies.lead_sponsor` and `studies.lead_sponsor_class` — this is where REQ-034 (`agency_class = 'INDUSTRY'`) filter is applied.
+- Industry collaborator rows (`lead_or_collaborator = 'collaborator'` AND `agency_class = 'INDUSTRY'`) are routed to the `collaborators` table below.
+- Non-industry sponsors (NIH, FED, NETWORK, OTHER) are discarded at ingest per REQ-034.
+
+**Why not a separate table:** Maintaining a separate `sponsors` table would require a JOIN to determine whether a trial has an industry lead — the `studies.lead_sponsor_class` column provides this in O(1) at query time.
+
+---
+
 ### `collaborators` — Industry Co-Sponsors (from AACT)
 
 | Column | Type | Usage |
@@ -176,10 +189,10 @@ The canonical SQL definitions live in `db/models.py` (SQLModel).
 | `alias` | TEXT PK | Raw sponsor name from ClinicalTrials.gov / AACT |
 | `canonical_name` | TEXT | Resolved company name (e.g., "Gilead Sciences") |
 | `ticker` | TEXT | Resolved public ticker (e.g., "GILD") |
-| `relationship_type` | TEXT | `EXACT_MATCH` \| `SUBSIDIARY` \| `PRIVATE` \| `ACADEMIC` \| `GOVERNMENT` \| `UNRESOLVED` |
+| `relationship_type` | TEXT | `EXACT_MATCH` \| `SUBSIDIARY` \| `PRIVATE` \| `ACADEMIC` \| `GOVERNMENT` \| `FOREIGN` \| `UNRESOLVED` |
 | `acquisition_date` | DATE | Date of M&A event (if applicable) |
 | `confidence` | REAL | 0.0–1.0 resolution confidence score |
-| `resolution_method` | TEXT | `ALIAS_TABLE_EXACT` \| `FUZZY_MATCH` \| `WEB_SEARCH_CONFIRMED` |
+| `resolution_method` | TEXT | `ALIAS_TABLE_EXACT` \| `FUZZY_MATCH` \| `WEB_SEARCH_CONFIRMED` \| `WEB_SEARCH_PRIVATE_CONFIRMED` |
 | `source_url` | TEXT | SEC 8-K or press release URL confirming resolution |
 | `created_date` | DATE | Date alias was first resolved |
 | `last_verified_date` | DATE | Date alias was last re-confirmed |
@@ -296,6 +309,8 @@ Read by Profiler for TAM calculation and Peer Reviewer for market size classific
 | `ticker` | TEXT | FK → companies |
 | `nct_id` | TEXT | FK → studies; one audit per trial |
 | `audit_date` | DATE | Run date |
+| `condition` | TEXT | Trial condition/indication (denormalized from `trial_pipeline` for query convenience) |
+| `phase` | TEXT | Trial phase: `PHASE1` \| `PHASE2` \| `PHASE3` |
 | `validity_score` | INTEGER | 0–100: 80–100=STRONG_SCIENCE, 60–79=SOLID, 40–59=WEAK, 20–39=VERY_WEAK, 0–19=FRAUD_RISK |
 | `verdict` | TEXT | `STRONG_SCIENCE` \| `SOLID` \| `WEAK` \| `VERY_WEAK` \| `FRAUD_RISK` |
 | `endpoint_switching_detected` | BOOLEAN | `true` if primary endpoint differs between registration and press release |
@@ -314,7 +329,7 @@ Read by Profiler for TAM calculation and Peer Reviewer for market size classific
 |--------|------|-------|
 | `ticker` | TEXT | FK → companies |
 | `scan_date` | DATE | Run date |
-| `signal` | TEXT | `CLUSTER_BUY` \| `STRONG_BUY` \| `SINGLE_BUY` \| `NEUTRAL` \| `CLUSTER_DISCRETIONARY_SELL` |
+| `signal` | TEXT | `CLUSTER_BUY` \| `STRONG_BUY` \| `SINGLE_BUY` \| `NEUTRAL` \| `SINGLE_DISCRETIONARY_SELL` \| `CLUSTER_DISCRETIONARY_SELL` |
 | `conviction_score` | INTEGER | 1–10 |
 | `total_open_market_buys` | INTEGER | Count of Code P transactions in look-back window |
 | `total_discretionary_sells` | INTEGER | Count of non-10b5-1 Code S transactions |
@@ -344,7 +359,7 @@ Only Code P (open-market purchase) transactions carry signal. Code A/D/F (RSU aw
 | `presentation_type` | TEXT | `ORAL` \| `LATE_BREAKING` \| `POSTER_DISCUSSION` \| `POSTER` — conference events only |
 | `market_impact_score` | INTEGER | 1–10 (PDUFA=9, Phase 3 Readout=8, AdComm=7, Phase 2 Readout=5) |
 | `source_url` | TEXT | SEC 8-K, FDA calendar, or conference abstract URL |
-| `source_type` | TEXT | `PDUFA_CALENDAR` \| `8K_FILING` \| `CONFERENCE_ABSTRACT` \| `COMPANY_GUIDANCE` |
+| `source_type` | TEXT | `PDUFA_CALENDAR` \| `8K_FILING` \| `CONFERENCE_ABSTRACT` \| `COMPANY_GUIDANCE` \| `RSS_NEWS` (from `news_articles` — pre-8K early signal) |
 | `scan_date` | DATE | Date catalyst was detected |
 
 **PK:** `(ticker, event_type, event_date)`
@@ -390,17 +405,18 @@ Consumed by: Volatility agent (catalyst within CSP window check), Strategist BAS
 | `partner_name` | TEXT | Partner company name |
 | `partner_ticker` | TEXT | Partner public ticker (if applicable) |
 | `partner_tier` | INTEGER | `1`=Major Pharma (16 firms), `2`=Mid-tier, `3`=Technology |
-| `partnership_type` | TEXT | `CO_DEVELOPMENT` \| `LICENSING` \| `CO_PROMOTION` \| `OPTION_TO_ACQUIRE` \| `TECHNOLOGY` |
+| `partnership_type` | TEXT | `CO_DEVELOPMENT` \| `LICENSING` \| `CO_PROMOTION` \| `OPTION_TO_ACQUIRE` \| `TECHNOLOGY` \| `ACADEMIC` |
 | `direction` | TEXT | `OUT` (company is licensor — positive) \| `IN` (company is licensee — FIPCO risk) |
 | `drug_asset` | TEXT | Drug or platform being partnered |
 | `indication` | TEXT | Target indication |
 | `deal_date` | DATE | Agreement execution date |
 | `upfront_usd` | BIGINT | Upfront payment in USD |
 | `milestone_usd` | BIGINT | Total potential milestone payments |
-| `quality_score` | INTEGER | **REQ-025:** `+2` Tier 1, `+1` Tier 2/3, `+2` if `upfront_usd > 0.10 × market_cap`, `−1` if `direction = IN` |
+| `market_cap_at_deal_usd` | BIGINT | Company market cap on `deal_date` — snapshotted at write time; prevents ratio calculation from drifting as market cap changes post-deal |
+| `quality_score` | INTEGER | **REQ-025:** `+2` Tier 1, `+1` Tier 2/3, `+2` if `upfront_usd > 0.10 × market_cap_at_deal_usd` (uses historical market cap, not current), `−1` if `direction = IN` |
 | `status` | TEXT | `ACTIVE` \| `TERMINATED` \| `PENDING` \| `ACQUISITION_COMPLETED` |
-| `confidence` | TEXT | `HIGH` (both CT.gov + SEC) \| `MEDIUM` (one source) \| `LOW` (LLM only) |
-| `source_type` | TEXT | `SEC_10K` \| `CLINICALTRIALS` \| `SEC_10K_AND_CLINICALTRIALS` |
+| `confidence` | TEXT | `HIGH` (≥2 sources confirmed) \| `MEDIUM` (one source) \| `LOW` (LLM only) |
+| `source_type` | TEXT | `SEC_10K` \| `CLINICALTRIALS` \| `SEC_10K_AND_CLINICALTRIALS` \| `RSS_NEWS` (news-detected, pending 8-K confirmation) |
 | `source_url` | TEXT | Source document URL |
 | `scan_date` | DATE | Date partnership was detected |
 
@@ -422,6 +438,7 @@ Consumed by: Volatility agent (catalyst within CSP window check), Strategist BAS
 | `top_institution_pct` | REAL | Top filer's `% of class` |
 | `price_drift_pct` | REAL | `(current_price - price_at_filing) / price_at_filing` |
 | `already_priced_in` | BOOLEAN | `true` if drift > 20% — Strategist REQ-024 will not recommend entry |
+| `conflicting_signal` | BOOLEAN | `true` if analyst downgrade in `news_articles` (category='analyst') within 7 days of a new specialist position — Smart Money Step 6 |
 | `analysis_summary` | TEXT | LLM narrative |
 | `full_json` | TEXT | Complete output |
 | `uploaded_to_rag` | BOOLEAN | After ChromaDB sync |
@@ -469,7 +486,71 @@ Used to compute: `position_value_usd = shares × companies.price_current`
 
 ---
 
-## 9. Computed / Derived Values (Not Stored)
+## 9. News Ingestion
+
+### `news_articles` — RSS-Sourced Industry Headlines (REQ-087–REQ-091)
+
+| Column | Type | Source | Usage |
+|--------|------|--------|-------|
+| `id` | INTEGER PK | System | Auto-increment |
+| `ticker` | TEXT | Post-fetch association pass | FK → companies; NULL until company name matched against headline (REQ-088). Excluded from association pass if `company_name` < 5 characters. |
+| `headline` | TEXT NOT NULL | RSS feed | Article title |
+| `source` | TEXT NOT NULL | System | `biopharmadive` \| `fiercepharma` \| `endpoints` \| `statnews` |
+| `url` | TEXT UNIQUE | RSS feed | Canonical article URL — deduplication key; `INSERT OR IGNORE` (REQ-090) |
+| `published_at` | DATETIME NOT NULL | RSS `<pubDate>` | Article publication timestamp |
+| `category` | TEXT | Derived at insert (REQ-089) | `m&a` \| `conference` \| `analyst` \| `partnership` \| `fda` \| NULL (unmatched) |
+| `fetched_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | System | When the row was inserted |
+
+**Indexes:** `(ticker, published_at)`, `(category, published_at)`
+
+**Categorization regex** (applied to `headline` at insert time):
+
+| Pattern | Category |
+|---------|----------|
+| `acqui\|merger\|buy.*out\|takeover` | `m&a` |
+| `ASCO\|ASH\|JPM\|AACR\|ESMO\|EHA` | `conference` |
+| `upgrade\|downgrade\|price target\|initiates` | `analyst` |
+| `partnership\|collaboration\|license\|royalt` | `partnership` |
+| `FDA\|PDUFA\|NDA\|BLA\|accelerated approval` | `fda` |
+
+**Pruning:** Weekly (Sunday 02:00) — rows older than 90 days deleted (REQ-091).
+
+**Consumed by:** Oracle (conference + fda categories), Scout (m&a category), Partnership (partnership category), Smart Money (analyst category).
+
+---
+
+## 10. System Metadata
+
+### `system_metadata` — Scheduler State Store
+
+Simple key-value store for scheduler state and sync timestamps. Used by ingestion scripts to detect anomalous row-count drops (REQ-079) and to avoid redundant full re-syncs.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `key` | TEXT PK | Identifier (e.g., `aact_last_sync`, `last_news_prune`, `aact_studies_prev_count`) |
+| `value` | TEXT NOT NULL | Value as string (ISO timestamps, counts) |
+| `updated_at` | TIMESTAMP DEFAULT CURRENT_TIMESTAMP | Last write time |
+
+**SQLModel definition (in `src/db/models.py`):**
+```python
+class SystemMetadata(SQLModel, table=True):
+    __tablename__ = "system_metadata"
+    key: str = Field(primary_key=True)
+    value: str
+    updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+```
+
+**Keys used by ingestion scripts:**
+
+| Key | Written by | Purpose |
+|-----|-----------|---------|
+| `aact_last_sync` | `fetch_aact_csvs.py` | ISO timestamp of last successful AACT upsert |
+| `aact_studies_prev_count` | `fetch_aact_csvs.py` | Row count from previous run — REQ-079 >10% drop alert |
+| `last_news_prune` | `scheduler.py` | ISO timestamp of last `news_articles` 90-day pruning |
+
+---
+
+## 11. Computed / Derived Values (Not Stored)
 
 These are computed at query time or by the Streamlit UI — never persisted:
 
@@ -483,7 +564,7 @@ These are computed at query time or by the Streamlit UI — never persisted:
 
 ---
 
-## 10. REQ Cross-Reference
+## 12. REQ Cross-Reference
 
 | REQ | Column(s) Affected | Table |
 |-----|--------------------|-------|
@@ -493,7 +574,7 @@ These are computed at query time or by the Streamlit UI — never persisted:
 | REQ-025 | `quality_score` | `partnerships` |
 | REQ-026 | `company_type` | `agent_profiler_findings` |
 | REQ-029 | `study_type` | `studies` |
-| REQ-034 | `lead_sponsor_class` filter | `studies` / `sponsors` (ingest) |
+| REQ-034 | `lead_sponsor_class = 'INDUSTRY'` filter applied at ingest from AACT `sponsors.txt`; non-INDUSTRY rows discarded | `studies.lead_sponsor_class` (output) |
 | REQ-040 | `entity_aliases` resolution rate | `entity_aliases` |
 | REQ-063 | Scheduler SLA | `output/scheduler_alerts.log` |
 | REQ-066 | `floor_price` | `companies` |
@@ -501,9 +582,14 @@ These are computed at query time or by the Streamlit UI — never persisted:
 | REQ-072 | `full_json`, `uploaded_to_rag` | All agent output tables |
 | REQ-074 | `enrollment_is_actual` | `studies` |
 | REQ-075 | `design_outcomes.measure` | `design_outcomes` |
-| REQ-079 | `aact_last_sync` metadata | `_metadata` row (SQLite) |
+| REQ-079 | `aact_last_sync`, `aact_studies_prev_count` | `system_metadata` |
 | REQ-084 | `drugs_extracted`, `extraction_confidence` | `company_onboarding_log` |
+| REQ-087 | RSS feed polling, 4h cadence | `news_articles` (ingestion) |
+| REQ-088 | Ticker association pass; `ticker` column | `news_articles` |
+| REQ-089 | `category` auto-assign via keyword regex | `news_articles` |
+| REQ-090 | `url` UNIQUE constraint, `INSERT OR IGNORE` | `news_articles` |
+| REQ-091 | 90-day pruning (Sunday 02:00) | `news_articles` |
 
 ---
 
-*Path uniformity: all scripts resolve `../biotech_tracker.db` relative to the project root. Single source of truth for all data variables and states.*
+*Path uniformity: all scripts resolve `biotech_tracker.db` relative to the project root via `os.environ.get("DB_PATH", "biotech_tracker.db")`. Python package imports use the `src/` prefix (`from src.db.models import ...`). Single source of truth for all data variables and states.*

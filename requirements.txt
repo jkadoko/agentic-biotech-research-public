@@ -1,0 +1,45 @@
+# Core orchestration
+crewai>=0.28.0
+crewai-tools
+litellm
+
+# Local LLM
+ollama
+
+# Vector store
+chromadb>=0.4.0
+
+# Database / ORM
+sqlmodel
+sqlalchemy
+
+# Data ingestion
+feedparser
+yfinance
+requests
+pandas
+sec-parser
+beautifulsoup4
+lxml
+
+# Fuzzy matching (Detective entity resolution)
+thefuzz[speedup]
+
+# Scheduling
+apscheduler
+
+# UI
+streamlit
+plotly
+
+# Auth (EtradePythonClient reference)
+rauth
+
+# Web search (no API key required)
+duckduckgo-search
+
+# Utilities
+python-dotenv
+
+# Testing
+pytest

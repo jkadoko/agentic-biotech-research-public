@@ -1,66 +1,275 @@
-# Biotech-Analyzer v3.0 - Dataflow Document
+# Biotech-Analyzer v3.5 — Dataflow Document
+
+**Version:** 3.5p
+**Last Updated:** 2026-03-15
+**Aligned with:** PRD v3.5p, ARCHITECTURE.md v3.5p, SCHEMA.md v3.5p
 
 ## Overview
-This document explicitly maps how data moves through the Biotech-Analyzer v3.0 system. The transition from v16.5 batch processing to v3.0 event-driven processing using CrewAI, Local Multi-Notebook RAG, and a single SQLite WAL database ensures maximum leverage and minimal complexity.
 
-## Phase 1: Ingestion (Data Collection)
-Raw data from various sources is gathered and normalized before being consumed by the agents.
+This document maps how data moves through the Biotech-Analyzer v3.5 system — from raw external sources through ingestion, agent processing, and knowledge base sync, to the Streamlit UI. The system uses a single SQLite WAL database (`biotech_tracker.db`) as the transactional backbone, with ChromaDB as the local vector store for semantic search. All external API calls target their respective v2/current endpoints. No PostgreSQL is required.
 
-*   **Financial & Market Data:** E*TRADE, Yfinance
-    *   **Data Types:** Real-time stock prices, options chains (IV, bid/ask), enterprise value, historical price charts.
-    *   **Destination:** `companies` table, `historical_prices` table in `biotech_tracker.db` (SQLite).
-*   **Clinical Trial Data:** ClinicalTrials.gov API v2
-    *   **Data Types:** Trial status, phase, conditions, completion dates, interventions.
-    *   **Destination:** `studies`, `conditions`, `interventions`, `collaborators` tables. A junction table `trial_pipeline` links NCT IDs to tickers. Unresolved sponsor names go to `entity_aliases` via Detective (001).
-*   **Regulatory & SEC Filings:** SEC EDGAR RSS Feeds
-    *   **Data Types:** 10-K, 10-Q, 8-K filings, Form 4 (insider trades), Form 13G/D (institutional ownership).
-    *   **Destination:** Uploaded directly to **Local Multi-Notebook RAG** via a Local Vector Router API. Documents are automatically partitioned to avoid the 500k words / 200MB limits per notebook. Essential metadata (filing date, ticker, type) is logged in `biotech_tracker.db`.
-*   **Epidemiology & Orphan Drug Data:** FDA, GBD, WHO GHO API
-    *   **Data Types:** Disease prevalence, orphan exclusivity dates. Sourced via Scout Agent's 4-tier waterfall (local cache → GBD CSV → WHO API → Local model search).
-    *   **Destination:** `disease_context`, `orphan` tables.
+---
 
-## Phase 2: Orchestration & AI Council (CrewAI Execution)
-The AI agents analyze the ingested data to generate actionable insights. The complex web of 23 custom scripts is replaced by a single, orchestrated CrewAI workflow.
+## Phase 0: Ticker Onboarding (One-Time, On-Demand)
 
-1.  **Trigger:** A daily cron job (`scripts/scheduler.py`) kicks off the `run_daily_automation` process.
-2.  **Data Retrieval (LangChain Tools):**
-    *   Agents pull raw financial/clinical data from the SQLite database using custom tools (e.g., `DatabaseQueryTool`).
-    *   Agents query Local Multi-Notebook RAG for complex historical or semantic analysis using the `LocalRAGTool` (e.g., "Summarize the risks section of MRNA's latest 10-K" or "Find similar Phase 3 trial failures in oncology").
-3.  **Agent Processing (Ollama GPU):**
-    *   **Crew 1 — Data Collection (Detective, Scout, Oracle):** Entity resolution, IPO discovery, catalyst calendar population.
-    *   **Crew 2 — Analysis (Profiler, Peer Reviewer, Insider, Partnership, Smart Money):** Deep dive into specific domains. The Peer Reviewer audits trial design; Insider/Smart Money track trading signals; Profiler scores company fundamentals.
-    *   **Crew 3 — Strategy (Volatility, Strategist):** Volatility calculates safe CSP strike prices; Strategist synthesizes all Crew 2 outputs into a final Investment Memo with BAS score, Kelly sizing, and a BUY/HOLD/SELL/REDUCE recommendation.
-4.  **Data Storage:** Agent outputs are stored in `biotech_tracker.db` (e.g., `agent_investment_memos`, `agent_volatility_findings`, `partnerships`).
+The onboarding pipeline runs **once per ticker** and re-runs whenever a new 10-K is detected. It is independent of the daily Crew 1–3 cycle and is the authoritative source of trial linkage for known tickers.
 
-## Phase 3: Knowledge Base Synchronization (Local Multi-Notebook RAG)
-A crucial loop in v3.0 is feeding agent outputs *back* into Local Multi-Notebook RAG. This provides the system with "memory" of its past decisions.
-
-*   **Action:** A weekly cron job (`scripts/sync_local_rag.py`) runs.
-*   **Process:** It queries the SQLite database for new `agent_investment_memos` and `agent_scientific_audits` that haven't been synced yet (`uploaded_to_rag = 0`).
-*   **Upload:** It pushes these documents to the appropriate Local Multi-Notebook RAG partition as markdown files.
-*   **Result:** The Strategist Agent can now query: "What did I recommend for BNTX last quarter, and was I right?"
-
-## Phase 4: User Interface (Streamlit)
-The Streamlit dashboard acts as the single pane of glass for the user. It is strictly read-only regarding the core database to prevent locking issues.
-
-*   **Display:** Renders the portfolio performance, current holdings, and active signals (e.g., "High Dilution Risk for MRNA").
-*   **Interaction:** Clicking a ticker fetches its static data, financial metrics, and the latest Strategist memo from SQLite.
-*   **Direct RAG Query:** Provides an input box allowing the user to bypass the agents and query Local Multi-Notebook RAG directly ("Show me all Phase 3 failures for CAR-T in 2023").
-
-## Data Flow Diagram
-
-```text
-[External APIs] ---> [Python Fetchers]
-       |                    |
-       | (SEC PDFs)         | (JSON/CSV)
-       v                    v
-[Local Vector Router API]  [SQLite DB]
-       |                    |
-[Local Multi-Notebook RAG] <---> [CrewAI Agents] <---> [Ollama GPU]
-       ^                    |
-       | (Weekly Sync)      | (Memos & Alerts)
-       |                    v
-[Sync Script] <------ [SQLite DB]
-                            |
-                      [Streamlit UI] <--- [User]
 ```
+New Ticker (Streamlit UI entry or Scout Task D)
+    │
+    ▼
+[Step 1] Validate ticker via yfinance
+    │
+    ▼
+[Step 2] Fetch latest 10-K from SEC EDGAR
+         → raw text + URL → sec_filings table
+    │
+    ▼
+[Step 3] Embed 10-K into ChromaDB
+         512-token overlapping chunks | Ollama embeddings
+         Partitioned by therapeutic area
+    │
+    ▼
+[Step 4] LLM structured extraction (llama3.1:8b)
+         Extracts: drug names, NCT IDs, pipeline phases, officers/board,
+         revenue stage, patent cliff dates, top risks, cash/burn/runway
+    │
+    ▼
+[Step 5] Upsert into SQLite
+         companies (onboarding_status = COMPLETE)
+         interventions (drug names per ticker)
+         company_onboarding_log (audit trail)
+    │
+    ▼
+[Step 6] Four-pass clinical trial linkage (CT.gov API v2)
+         Pass 1: NCT IDs cited verbatim in 10-K → direct lookup (10K_CITED)
+         Pass 2: Drug name search → /api/v2/studies?query.term={drug} (DRUG_NAME_MATCH)
+         Pass 3: Company name → sponsor + collaborator fields (COMPANY_NAME_MATCH)
+         Pass 4: Detective entity_aliases → resolved ticker → all trials for that sponsor (ENTITY_RESOLVED)
+                 (catches subsidiary/acquisition cases; lowest priority but highest recall)
+         → trial_pipeline table
+    │
+    ▼
+[Step 7] Drug database lookups
+         FDA Orphan Drug DB → orphan table
+         FDA Orange Book (small molecules) → interventions.orange_book_appl_no, patent_expiry
+         FDA Purple Book (biologics) → interventions.purple_book_bla_no, patent_expiry
+         Note: investigational drugs return NOT_FOUND — logged, not blocking
+    │
+    ▼
+[COMPLETE] Ticker ready for Crew 1–3 daily cycle
+```
+
+**Trigger conditions:**
+- User adds ticker via Streamlit → immediate
+- Scout Task A (IPO detection) → Scout Task D triggers post-triage
+- Daily scheduler 07:00 — runs for any ticker with `onboarding_status = PENDING` or `STALE`
+- `fetch_sec_filings.py` detects new 10-K → sets `onboarding_status = STALE`
+
+---
+
+## Phase 1: Nightly Data Ingestion (APScheduler — Batch)
+
+Python fetcher scripts run nightly, populating SQLite and ChromaDB before agents execute.
+
+### 1A. Financial & Market Data
+
+| Source | Data Types | Destination | Cadence |
+|---|---|---|---|
+| **E*TRADE API** | Live quotes, options chains (IV, OI, bid/ask) | `options_chains` table | Daily pre-market |
+| **yfinance** | Historical prices, EV, Market Cap, EPS | `companies`, `historical_prices` tables | Daily |
+
+### 1B. Clinical Trials
+
+Two parallel paths — real-time lookup vs. bulk analytical corpus:
+
+| Source | Data Types | Destination | Cadence |
+|---|---|---|---|
+| **ClinicalTrials.gov API v2** | Single-trial status, NCT detail, sponsors, outcomes | `studies`, `sponsors`, `conditions`, `trial_pipeline` | On-demand (Oracle, Detective, onboarding pipeline) |
+| **AACT CSV Upsert** (6 tables) | Bulk: `studies`, `sponsors`, `conditions`, `interventions`, `design_outcomes`, `collaborators` — pipe-delimited .txt files | Upserted directly into SQLite; powers Peer Reviewer endpoint taxonomy, Profiler competitive counts | Nightly download via HTTP (no PostgreSQL required) |
+
+**AACT routing:** Oracle and Detective use API v2 for real-time lookups. Profiler and Peer Reviewer use AACT tables via SQLite for bulk analytics.
+
+### 1C. SEC Filings
+
+- `fetch_sec_filings.py` polls RSS feed for new 10-K, 10-Q, 8-K, Form 4, 13G/13D filings
+- **Dual-write:** metadata → `sec_filings` table (SQLite) AND full text embedded into ChromaDB (partitioned by therapeutic area via `local_rag_tool.py` write mode)
+- If a new 10-K is detected → `onboarding_status = STALE` for that ticker → re-onboarding triggered at 07:00
+
+### 1D. FDA Data
+
+- **Orphan Drug DB:** designation dates, exclusivity → `orphan` table (weekly)
+- **PDUFA Calendar:** regulatory decision deadlines → parsed by Oracle agent (weekly)
+- **Orange Book / Purple Book:** queried per drug during onboarding Step 7
+
+### 1E. Financial News (RSS Feeds)
+
+- **Sources:** BioPharma Dive, Fierce Pharma, Endpoints News, STAT News
+- **Fetcher:** `fetch_news.py` — `feedparser` parses feeds every 4h; no API key required
+- **Auto-categorization:** keyword regex → category field: `m&a | conference | analyst | fda | partnership`
+- **Ticker association:** company name matching against `companies` table post-fetch
+- **Destination:** `news_articles` table
+- **Consuming agents:** Oracle (upcoming catalysts), Scout (market signals), Partnership (deal detection), Smart Money (institutional signals)
+
+---
+
+## Phase 2: Daily Agent Execution (CrewAI — 3 Crews)
+
+**APScheduler SLA (REQ-063):** Full pipeline completes by 11:00 AM local time.
+
+```
+07:00 — Onboarding: process PENDING/STALE tickers
+08:00 — Crew 1 (Data Collection)  — Detective · Scout · Oracle
+09:00 — Crew 2 (Analysis)         — Profiler · Peer Reviewer · Insider · Partnership · Smart Money
+10:30 — Crew 3 (Strategy)         — Volatility · Strategist
+```
+
+Crews are staggered to prevent concurrent GPU-heavy tasks on the 2x Tesla P4s (8GB VRAM each).
+
+### Data Retrieval per Crew
+
+Each agent accesses data through two paths:
+
+1. **SQLite (structured):** `DatabaseQueryTool` → financial metrics, trial pipeline, insider trades, options chains, news articles
+2. **ChromaDB (semantic):** `LocalRAGTool` read mode → "Summarize MRNA's risk factors", "Find similar Phase 3 CAR-T failures in DLBCL"
+
+### Crew 1 — Data Collection (Parallel)
+
+| Agent | Primary Inputs | Primary Outputs |
+|---|---|---|
+| Detective (001) | `entity_aliases`, AACT sponsors, CT.gov API v2 | `entity_aliases`, `trial_pipeline` ticker updates |
+| Scout (002) | SEC EDGAR S-1 (direct HTTP), ChromaDB `sec_filings`, CT.gov API v2 (Task C), `disease_context`, `news_articles` | `companies` (new tickers), `disease_context`, `watchlist_flags` patch (MA_RUMOR_FLAG), triggers onboarding |
+| Oracle (008) | CT.gov API v2, FDA PDUFA calendar, `news_articles` | `catalysts` (PDUFA, conference, Phase readout events) |
+
+### Crew 2 — Analysis (Parallel, runs after Crew 1)
+
+| Agent | Primary Inputs | Primary Outputs |
+|---|---|---|
+| Profiler (003) | `companies`, `disease_context`, AACT SQLite, CT.gov v2 | `agent_profiler_findings` |
+| Peer Reviewer (004) | AACT `design_outcomes`, ChromaDB trial docs, CT.gov v2 | `agent_scientific_audits` |
+| Insider (005) | `sec_filings` (Form 4), `companies` | `agent_insider_findings` |
+| Partnership (010) | `sec_filings` (8-K), ChromaDB, `news_articles` | `partnerships` |
+| Smart Money (011) | `sec_filings` (13G/13D), `news_articles` | `agent_smart_money_findings` |
+
+### Crew 3 — Strategy (Sequential, runs after Crew 2)
+
+| Agent | Primary Inputs | Primary Outputs |
+|---|---|---|
+| Volatility (009) | `options_chains`, `catalysts`, `companies` | `agent_volatility_findings` (CSP strike, IV, rejection reason) |
+| Strategist (006) | All Crew 2 outputs + Volatility findings, ChromaDB `agent_memos` (longitudinal context via `LocalRAGTool`), `options_chains` | `agent_investment_memos` (BAS score, Kelly sizing, recommendation) — local inference only (deepseek-r1:7b-q4_K_M via `OllamaLLMTool`; cloud models forbidden) |
+
+All agent outputs are also exported to `output/{agent_name}/{ticker}_{YYYYMMDD}.json` (REQ-072).
+
+---
+
+## Phase 3: Knowledge Base Synchronization (Weekly)
+
+A feedback loop feeds agent outputs back into ChromaDB to create longitudinal memory.
+
+```
+[Weekly cron: scripts/sync_local_rag.py]
+    │
+    ▼
+Query SQLite: new agent_investment_memos + agent_scientific_audits
+             WHERE uploaded_to_rag = 0
+    │
+    ▼
+Embed as markdown → ChromaDB (partitioned by therapeutic area)
+    │
+    ▼
+Set uploaded_to_rag = 1 on synced records
+    │
+    ▼
+Result: Strategist can now query historical context:
+        "What did I recommend for BNTX last quarter, and was I right?"
+```
+
+---
+
+## Phase 4: User Interface (Streamlit — Read-Only)
+
+Streamlit reads pre-computed results from SQLite only. No agent logic runs in the UI layer.
+
+- **Portfolio Dashboard:** Performance, Sharpe Ratio, Drawdown, active CSP positions
+- **Holdings Table:** Active signals per ticker (BAS score, recommendation, upcoming catalysts)
+- **Agent Reports:** Click ticker → latest Strategist investment memo
+- **News Feed:** Latest `news_articles` with category filter
+- **Direct RAG Query:** Free-text search directly against ChromaDB (bypasses agents)
+
+---
+
+## Full Dataflow Diagram
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    EXTERNAL SOURCES                      │
+│  SEC EDGAR  │  CT.gov v2  │  AACT CSVs  │  E*TRADE      │
+│  yfinance   │  FDA (OB/PB/Orphan/PDUFA) │  RSS Feeds    │
+└──────┬──────┴──────┬───────┴──────┬──────┴──────┬────────┘
+       │             │              │             │
+       ▼             ▼              ▼             ▼
+┌─────────────────────────────────────────────────────────┐
+│               INGESTION LAYER (APScheduler)              │
+│  fetch_sec_filings.py  │  fetch_clinical_trials.py       │
+│  fetch_aact_csvs.py    │  fetch_market_data.py           │
+│  fetch_fda_data.py     │  fetch_options.py               │
+│  fetch_news.py (4h)    │  onboard_company.py             │
+│  sync_local_rag.py (weekly)                              │
+└──────┬────────────────────────────────────┬─────────────┘
+       │                                    │
+       ▼                                    ▼
+┌─────────────────┐               ┌────────────────────┐
+│  SQLite WAL DB  │               │   ChromaDB (local) │
+│ biotech_tracker │◄─────────────►│  SEC filings text  │
+│     .db         │               │  Agent memos       │
+│                 │               │  Trial protocols   │
+└────────┬────────┘               └─────────┬──────────┘
+         │                                  │
+         └──────────┬───────────────────────┘
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │  CrewAI Agent Council     │
+        │                           │
+        │  Crew 1 (08:00, parallel) │
+        │  Detective · Scout · Oracle│
+        │           │               │
+        │  Crew 2 (09:00, parallel) │
+        │  Profiler · Peer Reviewer │
+        │  Insider · Partnership    │
+        │  Smart Money              │
+        │           │               │
+        │  Crew 3 (10:30, sequential│
+        │  Volatility · Strategist  │
+        └─────────────┬─────────────┘
+                      │  [reads/writes SQLite]
+                      │  [queries ChromaDB]
+                      │  [inference via Ollama 2x Tesla P4]
+                      ▼
+              ┌───────────────┐
+              │  SQLite WAL   │◄── Investment memos, BAS scores,
+              │  (results)    │    catalyst calendar, signals
+              └───────┬───────┘
+                      │
+                      ▼
+              ┌───────────────┐
+              │  Streamlit UI │◄── User (read-only dashboard)
+              └───────────────┘
+```
+
+---
+
+## Key Design Constraints
+
+| Constraint | Value | Source |
+|---|---|---|
+| APScheduler pipeline completion | ≤ 11:00 AM local | REQ-063 |
+| AACT sync staleness alert | > 48h since last sync | REQ-079 |
+| SEC EDGAR inter-request delay | ≥ 0.1s | REQ-081 |
+| ClinicalTrials.gov inter-request delay | ≥ 0.1s | REQ-002 |
+| Non-destructive upserts | NULL incoming never overwrites valid | REQ-004 |
+| Agent JSON output persistence | `output/{agent}/{ticker}_{YYYYMMDD}.json` | REQ-072 |
+| AACT enrollment filter | `enrollment_is_actual = 1` only for TAM | REQ-074 |
+| Sponsor class filter | `agency_class = 'INDUSTRY'` only | REQ-034 |
+| ChromaDB partition | By therapeutic area | ARCHITECTURE |
+| Ollama call cap (Scout epidemiology) | 20 conditions per call | REQ-080 |
