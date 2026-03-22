@@ -22,16 +22,28 @@ from sqlmodel import Field, SQLModel, create_engine
 # ---------------------------------------------------------------------------
 
 DB_PATH = os.environ.get("DB_PATH", "biotech_tracker.db")
-_connect_args = {"check_same_thread": False}
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args=_connect_args, echo=False)
+_connect_args = {
+    "check_same_thread": False,
+    "timeout": 30.0,  # 30 second timeout for lock acquisition
+}
+engine = create_engine(
+    f"sqlite:///{DB_PATH}",
+    connect_args=_connect_args,
+    echo=False,
+    pool_pre_ping=True,  # Verify connections before use
+    pool_size=5,
+    max_overflow=10,
+)
 
 
 @event.listens_for(engine, "connect")
 def _set_wal_mode(dbapi_conn, _):
-    """Enable WAL mode and foreign keys on every new connection."""
+    """Enable WAL mode, busy timeout, and foreign keys on every new connection."""
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA synchronous=NORMAL")  # Better performance with WAL
     cursor.close()
 
 

@@ -16,11 +16,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from contextlib import contextmanager
 from datetime import date, datetime
-from typing import Any, Generator
+from functools import wraps
+from typing import Any, Callable, Generator, TypeVar
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlmodel import Session, select
 
 from src.db.models import (
@@ -53,6 +55,60 @@ from src.db.models import (
 )
 
 log = logging.getLogger(__name__)
+
+# Sentinel nct_id used for drugs extracted from 10-K before a real trial is linked.
+# A corresponding row must exist in `studies` before any intervention insert (FK guard).
+ONBOARDING_NCT_ID = "ONBOARDING"
+
+# ---------------------------------------------------------------------------
+# Retry decorator for database lock handling
+# ---------------------------------------------------------------------------
+
+F = TypeVar('F', bound=Callable[..., Any])
+
+
+def retry_on_db_lock(max_attempts: int = 3, initial_delay: float = 0.5) -> Callable[[F], F]:
+    """
+    Decorator to retry database operations on OperationalError (database locked).
+
+    Uses exponential backoff: 0.5s, 1s, 2s delays by default.
+    Useful for handling concurrent database access in SQLite.
+    """
+    def decorator(func: F) -> F:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            delay = initial_delay
+            last_exception = None
+
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except OperationalError as e:
+                    last_exception = e
+                    if "database is locked" in str(e).lower():
+                        if attempt < max_attempts - 1:
+                            log.warning(
+                                "%s failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                                func.__name__, attempt + 1, max_attempts, e, delay
+                            )
+                            time.sleep(delay)
+                            delay *= 2  # Exponential backoff
+                        else:
+                            log.error(
+                                "%s failed after %d attempts: %s",
+                                func.__name__, max_attempts, e
+                            )
+                    else:
+                        # Not a lock error, re-raise immediately
+                        raise
+
+            # If we get here, all retries failed
+            raise last_exception  # type: ignore
+
+        return wrapper  # type: ignore
+
+    return decorator
+
 
 # ---------------------------------------------------------------------------
 # Session factory
@@ -98,6 +154,7 @@ def _set_last_updated(obj: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+@retry_on_db_lock()
 def upsert_company(session: Session, data: dict[str, Any]) -> Company:
     """
     Insert or update a row in `companies`.
@@ -106,6 +163,8 @@ def upsert_company(session: Session, data: dict[str, Any]) -> Company:
     ticker = data.get("ticker")
     if not ticker:
         raise ValueError("upsert_company: 'ticker' is required")
+
+    session.flush()  # Flush pending changes before query to avoid autoflush
 
     existing = session.get(Company, ticker)
     if existing is None:
@@ -188,6 +247,21 @@ def upsert_study(session: Session, data: dict[str, Any]) -> Study:
     _merge_into(existing, data)
     session.add(existing)
     return existing
+
+
+def ensure_onboarding_study_sentinel(session: Session) -> Study:
+    """
+    Guarantee that the 'ONBOARDING' placeholder row exists in `studies`.
+
+    Must be called before any upsert_intervention(..., nct_id='ONBOARDING') to
+    satisfy the FK constraint interventions.nct_id → studies.nct_id.
+    REQ-004-safe: uses upsert_study so it never overwrites existing non-NULL fields.
+    """
+    return upsert_study(session, {
+        "nct_id": ONBOARDING_NCT_ID,
+        "title": "Placeholder — drug not yet linked to a clinical trial",
+        "status": "PLACEHOLDER",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +439,7 @@ def upsert_sec_filing(session: Session, data: dict[str, Any]) -> SecFiling:
 # ---------------------------------------------------------------------------
 
 
+@retry_on_db_lock()
 def write_onboarding_log(session: Session, data: dict[str, Any]) -> CompanyOnboardingLog:
     """Always inserts a new audit record (no update — audit trail must be append-only)."""
     obj = CompanyOnboardingLog(**{k: v for k, v in data.items() if v is not None})
@@ -546,15 +621,23 @@ def associate_news_tickers(session: Session) -> int:
         select(NewsArticle).where(NewsArticle.ticker == None)
     ).all()
 
+    # Pre-compute valid lowercased names and tickers to avoid O(N*M) string allocations
+    valid_companies = []
+    for co in companies:
+        name = co.company_name or ""
+        if len(name) >= 5:
+            valid_companies.append({
+                "ticker": co.ticker,
+                "ticker_lower": co.ticker.lower(),
+                "name_lower": name.lower(),
+            })
+
     count = 0
     for article in untagged:
         hl = article.headline.lower()
-        for co in companies:
-            name = co.company_name or ""
-            if len(name) < 5:
-                continue
-            if name.lower() in hl or co.ticker.lower() in hl:
-                article.ticker = co.ticker
+        for co in valid_companies:
+            if co["name_lower"] in hl or co["ticker_lower"] in hl:
+                article.ticker = co["ticker"]
                 session.add(article)
                 count += 1
                 break  # first match wins
@@ -597,8 +680,13 @@ def get_active_tickers(session: Session) -> list[str]:
     return [r.ticker for r in rows]
 
 
+@retry_on_db_lock()
 def mark_company_onboarding_status(session: Session, ticker: str, status: str) -> None:
     """Update onboarding_status for a ticker. status ∈ {PENDING, COMPLETE, FAILED, STALE}."""
+    # Flush any pending changes BEFORE calling session.get() to avoid
+    # query-invoked autoflush while the database might be locked
+    session.flush()
+
     co = session.get(Company, ticker)
     if co:
         co.onboarding_status = status

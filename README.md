@@ -1,9 +1,6 @@
 # Biotech-Analyzer v3.5
 
 > [!NOTE]
-> **Public Repository Mirror**
-> This repository is a sanitized public mirror containing the core AI engine and agent specifications. The Streamlit dashboard, data ingestion pipelines, active trading strategies, and proprietary execution logs are maintained in a private upstream repository.
-
 An AI-driven investment intelligence platform for the biotechnology sector. Ten specialized AI agents orchestrated by CrewAI analyze clinical trial data, SEC filings, insider activity, FDA catalysts, and options markets — all running 100% locally on your hardware.
 
 > [!WARNING]
@@ -14,33 +11,28 @@ An AI-driven investment intelligence platform for the biotechnology sector. Ten 
 
 ## How It Works
 
-The system runs as a set of Docker services. A nightly scheduler pulls data from public sources, stores it in a local SQLite database, and hands it to a council of 10 AI agents that produce investment memos. A Streamlit dashboard surfaces the results.
+The system exposes a core engine of 10 specialized AI agents. A nightly scheduler (running in the private upstream) orchestrates data ingestion from public sources into a local SQLite database, which is then processed by the agents to produce investment intelligence.
 
 ### Data Flow
 
 ```
 External Sources                  Local Storage          Agents (CrewAI)
 ─────────────────                 ─────────────          ───────────────
-ClinicalTrials.gov API v2    →    SQLite WAL      →      Crew 1: Data Collection  [08:00 UTC]
+ClinicalTrials.gov API v2    →    SQLite WAL      →      Crew 1: Data Collection
 AACT bulk CSV (nightly)      →    (biotech_tracker.db)   │  Detective — entity resolution
 SEC EDGAR (10-K/8-K/Form 4)  →                           │  Scout — IPO watch / M&A
 yfinance / E*TRADE (options) →    ChromaDB               │  Oracle — PDUFA / catalysts
 FDA Orange/Purple Book       →    (local vector store)   │
-RSS feeds (4 biotech outlets →                    →      Crew 2: Analysis         [09:00 UTC]
-  every 4h)                                              │  Profiler — company intelligence
+RSS feeds (4 biotech outlets) →                    →      Crew 2: Analysis
+                                                         │  Profiler — company intelligence
                                                          │  Peer Reviewer — trial science
                                                          │  Insider — Form 4 tracking
                                                          │  Partnership — BD&L signals
                                                          │  Smart Money — 13G/13D tracking
                                                          │
-                                                  →      Crew 3: Strategy         [10:30 UTC]
+                                                   →      Crew 3: Strategy
                                                          │  Volatility — CSP strike selection
-                                                         └  Strategist — investment memo + Kelly sizing
-                                                                  │
-                                                                  ▼
-                                                         Streamlit Dashboard  (port 80 via Nginx)
-                                                           Page 1: Catalyst Timeline + Gantt
-                                                           Page 2: Analyst Workspace + RAG chat
+                                                         └  Strategist — investment memo
 ```
 
 ### Agent Roster
@@ -67,6 +59,9 @@ All inference is local via Ollama. No data leaves your machine.
 - Python 3.11+
 - Ollama (installed locally with `llama3.1:8b`, `llama3.2:3b`, and `deepseek-r1:7b-q4_K_M` models pulled)
 - NVIDIA GPU with CUDA support recommended for LLM inference
+- 8 GB RAM minimum
+
+---
 
 ---
 
@@ -96,6 +91,16 @@ ETRADE_CONSUMER_KEY=your_key
 ETRADE_CONSUMER_SECRET=your_secret
 ```
 
+### 3. Running the Dashboard
+
+To launch the premium glassmorphic UI, run:
+
+```bash
+streamlit run app/main.py
+```
+
+*Note: On Windows, ensure you are in the project root and your virtual environment is active.*
+
 ---
 
 ## Core Usage
@@ -119,35 +124,7 @@ run_analysis_crew(ticker)
 run_strategy_crew(ticker)
 ```
 
-Outputs are automatically written to a local SQLite database (`biotech_tracker.db`) managed by the `src.db` module.
-
----
-
-## Querying the Datastore
-
-As the agents run, they populate a local SQLite database that you can interrogate using standard SQL:
-
-```bash
-# Open an interactive SQLite shell
-sqlite3 biotech_tracker.db
-```
-
-```sql
-.mode column
-.headers on
-
--- View latest investment memos and BAS scores
-SELECT ticker, biotech_alpha_score, primary_recommendation, memo_date
-FROM agent_investment_memos
-ORDER BY memo_date DESC
-LIMIT 5;
-
--- Find upcoming high-impact catalysts
-SELECT ticker, event_type, event_date, market_impact_score, drug_name
-FROM catalysts
-WHERE event_date BETWEEN date('now') AND date('now', '+90 days')
-  AND market_impact_score >= 7;
-```
+Outputs are processed by the internal `src.db` module and stored in a local SQLite database (`biotech_tracker.db`).
 
 ---
 
@@ -168,9 +145,23 @@ agentic-biotech-research-public/
 │   ├── SCHEMA.md        # Database layout
 │   └── CREWAI_TOOLS.md  # Agentic tool signatures
 │
+├── scripts/
+│   ├── hello_world_crew.py  # Smoke test (verify architecture/models)
+│   ├── init_chromadb.py     # Initialize local vector store
+│   └── load_companies.py    # Seed database with pre-curated tickers
+│
+├── config/
+│   └── strategy_config.json # Strategy thresholds and weights
+│
+├── data/
+│   └── companies.csv        # 1,391 pre-curated biotech tickers
+│
 ├── .env.example
 ├── requirements.txt
 ├── pyproject.toml
+├── setup.py
+├── Dockerfile
+├── docker-compose.yml
 └── README.md
 ```
 
@@ -182,22 +173,37 @@ For deep-dives into the architecture, check out the core documentation:
 
 | File | Contents |
 |------|----------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture, minimal deployment structure |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and design principles |
 | [docs/DATAFLOW.md](docs/DATAFLOW.md) | Data flow per phase (ingestion → agents) |
 | [docs/SCHEMA.md](docs/SCHEMA.md) | Complete SQLite schema — authoritative variable reference |
-| [docs/CREWAI_TOOLS.md](docs/CREWAI_TOOLS.md) | Tool specifications, agent-tool matrix, compliance rules |
+| [docs/CREWAI_TOOLS.md](docs/CREWAI_TOOLS.md) | Tool specifications and agent-tool matrix |
 
 ---
 
 ## Investment Strategies Supported
 
-| Strategy | REQ | Trigger Condition |
-|---|---|---|
-| Cash-Secured Put (CSP) | REQ-011 | High IV, floor price safety, no catalyst within expiry window, OI ≥ 500 |
-| Deep Value | REQ-012 | Cash > market cap OR runway > 18 months, science score ≥ 40 |
-| Moonshot | REQ-014 | Orphan/TAM > $1B + science score > 80 + market cap < $500M |
-| Smart Money Follow | REQ-024 | Specialist cluster 13G/D + insider Code P confirmation + drift ≤ 20% |
-| Commercial Viability | REQ-027 | No patent cliff + Tier 1 partner + TAM > $500M |
+| Strategy | Trigger Condition |
+|---|---|
+| Cash-Secured Put (CSP) | High IV, floor price safety, no catalyst within expiry window |
+| Deep Value | Cash > market cap OR runway > 18 months, science score ≥ 40 |
+| Moonshot | Orphan/TAM > $1B + science score > 80 + market cap < $500M |
+| Smart Money Follow | Specialist cluster 13G/D + insider Code P confirmation |
+| Commercial Viability | No patent cliff + Tier 1 partner + TAM > $500M |
+
+---
+
+## Troubleshooting
+
+**SEC Data ingestion fails (no 10-K found)**
+- Check `SEC_USER_AGENT` is set in `.env` — EDGAR blocks requests without a valid User-Agent.
+- Ensure the ticker exists and is registered with the SEC.
+
+**Crew fails with `connection refused` to Ollama**
+- Ensure Ollama is running locally (`ollama serve`).
+- Verify that necessary models (`llama3.1:8b`, etc.) are pulled: `ollama list`.
+
+**ChromaDB embedding issues**
+- Ensure `mxbai-embed-large:latest` is pulled on your local Ollama instance.
 
 ---
 

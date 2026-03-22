@@ -40,6 +40,8 @@ duckduckgo-search
 
 # Utilities
 python-dotenv
+notebooklm-py
+playwright
 
 # Testing
 pytest
