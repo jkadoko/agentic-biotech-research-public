@@ -41,7 +41,7 @@ class NotebookLMTool:
         if not self.notebook_id:
             log.warning("NOTEBOOKLM_BIOTECH_ID not found in environment")
 
-    async def _query_async(self, ticker: str) -> dict | None:
+    async def _query_async(self, ticker: str, prompt_template: str = None) -> dict | None:
         """Internal async implementation of the query."""
         if not NotebookLMClient:
             log.error("notebooklm-py library not installed")
@@ -57,7 +57,8 @@ class NotebookLMTool:
             
             # Increase timeout to 90s for complex notebook queries
             async with await NotebookLMClient.from_storage(path=auth_path, timeout=90) as client:
-                prompt = _EXTRACTION_PROMPT.format(ticker=ticker)
+                template = prompt_template or _EXTRACTION_PROMPT
+                prompt = template.format(ticker=ticker)
                 
                 log.info("Querying NotebookLM for ticker: %s", ticker)
                 result = await client.chat.ask(self.notebook_id, prompt)
@@ -81,13 +82,13 @@ class NotebookLMTool:
             log.error("NotebookLM API error for %s: %s", ticker, e)
             return None
 
-    def query_ticker(self, ticker: str) -> dict | None:
+    def query_ticker(self, ticker: str, prompt_template: str = None) -> dict | None:
         """
         Synchronous wrapper to query the notebook for a specific ticker.
         Returns a dict with extracted info or None on failure.
         """
         try:
-            return asyncio.run(self._query_async(ticker))
+            return asyncio.run(self._query_async(ticker, prompt_template))
         except Exception as e:
             log.error("Async execution failed for NotebookLMTool: %s", e)
             return None

@@ -100,6 +100,9 @@ streamlit run app/main.py
 ```
 
 *Note: On Windows, ensure you are in the project root and your virtual environment is active.*
+```bash
+.venv\Scripts\activate   
+```
 
 ---
 

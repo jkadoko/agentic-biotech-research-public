@@ -8,6 +8,7 @@ REQ-004: DatabaseWriteTool never overwrites existing non-NULL values with NULL.
 import json
 import os
 import sqlite3
+from pathlib import Path
 
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -42,9 +43,13 @@ class DatabaseQueryTool(BaseTool):
 
     def _run(self, query: str) -> str:
         try:
-            if not query.strip().upper().startswith("SELECT"):
-                return "Error: Only SELECT queries are permitted."
-            with sqlite3.connect(self.db_path) as conn:
+            query_upper = query.strip().upper()
+            if not (query_upper.startswith("SELECT") or query_upper.startswith("WITH") or query_upper.startswith("VALUES")):
+                return "Error: Only SELECT, WITH, and VALUES queries are permitted."
+
+            db_uri = f"{Path(self.db_path).absolute().as_uri()}?mode=ro"
+
+            with sqlite3.connect(db_uri, uri=True) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(query)
                 rows = [dict(row) for row in cursor.fetchall()]

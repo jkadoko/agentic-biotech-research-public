@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -25,34 +26,15 @@ from typing import Any, Callable, Generator, TypeVar
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlmodel import Session, select
 
-from src.db.models import (
-    AgentInsiderFinding,
-    AgentInvestmentMemo,
-    AgentProfilerFinding,
-    AgentScientificAudit,
-    AgentSmartMoneyFinding,
-    AgentVolatilityFinding,
-    Catalyst,
-    Collaborator,
-    Company,
-    CompanyOnboardingLog,
-    Condition,
-    DesignOutcome,
-    DiseaseContext,
-    EntityAlias,
-    HistoricalPrice,
-    Intervention,
-    NewsArticle,
-    OptionsChain,
-    Orphan,
-    Partnership,
-    SecFiling,
-    SmartMoneyPosition,
-    Study,
-    SystemMetadata,
-    TrialPipeline,
-    engine,
-)
+from src.db.models import (AgentInsiderFinding, AgentInvestmentMemo,
+                           AgentProfilerFinding, AgentScientificAudit,
+                           AgentSmartMoneyFinding, AgentVolatilityFinding,
+                           Catalyst, Collaborator, Company,
+                           CompanyOnboardingLog, Condition, DesignOutcome,
+                           DiseaseContext, EntityAlias, HistoricalPrice,
+                           Intervention, NewsArticle, OptionsChain, Orphan,
+                           Partnership, SecFiling, SmartMoneyPosition, Study,
+                           SystemMetadata, TrialPipeline, engine)
 
 log = logging.getLogger(__name__)
 
@@ -64,16 +46,19 @@ ONBOARDING_NCT_ID = "ONBOARDING"
 # Retry decorator for database lock handling
 # ---------------------------------------------------------------------------
 
-F = TypeVar('F', bound=Callable[..., Any])
+F = TypeVar("F", bound=Callable[..., Any])
 
 
-def retry_on_db_lock(max_attempts: int = 3, initial_delay: float = 0.5) -> Callable[[F], F]:
+def retry_on_db_lock(
+    max_attempts: int = 3, initial_delay: float = 0.5
+) -> Callable[[F], F]:
     """
     Decorator to retry database operations on OperationalError (database locked).
 
     Uses exponential backoff: 0.5s, 1s, 2s delays by default.
     Useful for handling concurrent database access in SQLite.
     """
+
     def decorator(func: F) -> F:
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -89,14 +74,20 @@ def retry_on_db_lock(max_attempts: int = 3, initial_delay: float = 0.5) -> Calla
                         if attempt < max_attempts - 1:
                             log.warning(
                                 "%s failed (attempt %d/%d): %s. Retrying in %.1fs...",
-                                func.__name__, attempt + 1, max_attempts, e, delay
+                                func.__name__,
+                                attempt + 1,
+                                max_attempts,
+                                e,
+                                delay,
                             )
                             time.sleep(delay)
                             delay *= 2  # Exponential backoff
                         else:
                             log.error(
                                 "%s failed after %d attempts: %s",
-                                func.__name__, max_attempts, e
+                                func.__name__,
+                                max_attempts,
+                                e,
                             )
                     else:
                         # Not a lock error, re-raise immediately
@@ -187,7 +178,11 @@ def upsert_historical_price(session: Session, data: dict[str, Any]) -> Historica
     ticker = data["ticker"]
     price_date = data.get("price_date") or data.get("date")
     # Normalise key: model field is price_date, ingestion dicts may use "date"
-    normalised = {("price_date" if k == "date" else k): v for k, v in data.items() if v is not None}
+    normalised = {
+        ("price_date" if k == "date" else k): v
+        for k, v in data.items()
+        if v is not None
+    }
     existing = session.get(HistoricalPrice, (ticker, price_date))
     if existing is None:
         obj = HistoricalPrice(**normalised)
@@ -257,11 +252,14 @@ def ensure_onboarding_study_sentinel(session: Session) -> Study:
     satisfy the FK constraint interventions.nct_id → studies.nct_id.
     REQ-004-safe: uses upsert_study so it never overwrites existing non-NULL fields.
     """
-    return upsert_study(session, {
-        "nct_id": ONBOARDING_NCT_ID,
-        "title": "Placeholder — drug not yet linked to a clinical trial",
-        "status": "PLACEHOLDER",
-    })
+    return upsert_study(
+        session,
+        {
+            "nct_id": ONBOARDING_NCT_ID,
+            "title": "Placeholder — drug not yet linked to a clinical trial",
+            "status": "PLACEHOLDER",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +267,9 @@ def ensure_onboarding_study_sentinel(session: Session) -> Study:
 # ---------------------------------------------------------------------------
 
 
-def upsert_trial_pipeline(session: Session, ticker: str, nct_id: str,
-                           relationship_type: str) -> TrialPipeline:
+def upsert_trial_pipeline(
+    session: Session, ticker: str, nct_id: str, relationship_type: str
+) -> TrialPipeline:
     """
     Insert or update a ticker↔trial linkage.
     Priority: 10K_CITED > DRUG_NAME_MATCH > COMPANY_NAME_MATCH > ENTITY_RESOLVED.
@@ -285,7 +284,9 @@ def upsert_trial_pipeline(session: Session, ticker: str, nct_id: str,
 
     existing = session.get(TrialPipeline, (ticker, nct_id))
     if existing is None:
-        obj = TrialPipeline(ticker=ticker, nct_id=nct_id, relationship_type=relationship_type)
+        obj = TrialPipeline(
+            ticker=ticker, nct_id=nct_id, relationship_type=relationship_type
+        )
         session.add(obj)
         return obj
 
@@ -440,7 +441,9 @@ def upsert_sec_filing(session: Session, data: dict[str, Any]) -> SecFiling:
 
 
 @retry_on_db_lock()
-def write_onboarding_log(session: Session, data: dict[str, Any]) -> CompanyOnboardingLog:
+def write_onboarding_log(
+    session: Session, data: dict[str, Any]
+) -> CompanyOnboardingLog:
     """Always inserts a new audit record (no update — audit trail must be append-only)."""
     obj = CompanyOnboardingLog(**{k: v for k, v in data.items() if v is not None})
     session.add(obj)
@@ -452,7 +455,9 @@ def write_onboarding_log(session: Session, data: dict[str, Any]) -> CompanyOnboa
 # ---------------------------------------------------------------------------
 
 
-def upsert_profiler_finding(session: Session, data: dict[str, Any]) -> AgentProfilerFinding:
+def upsert_profiler_finding(
+    session: Session, data: dict[str, Any]
+) -> AgentProfilerFinding:
     pk = (data["ticker"], data["profile_date"])
     existing = session.get(AgentProfilerFinding, pk)
     if existing is None:
@@ -464,7 +469,9 @@ def upsert_profiler_finding(session: Session, data: dict[str, Any]) -> AgentProf
     return existing
 
 
-def upsert_scientific_audit(session: Session, data: dict[str, Any]) -> AgentScientificAudit:
+def upsert_scientific_audit(
+    session: Session, data: dict[str, Any]
+) -> AgentScientificAudit:
     pk = (data["ticker"], data["nct_id"], data["audit_date"])
     existing = session.get(AgentScientificAudit, pk)
     if existing is None:
@@ -476,7 +483,9 @@ def upsert_scientific_audit(session: Session, data: dict[str, Any]) -> AgentScie
     return existing
 
 
-def upsert_insider_finding(session: Session, data: dict[str, Any]) -> AgentInsiderFinding:
+def upsert_insider_finding(
+    session: Session, data: dict[str, Any]
+) -> AgentInsiderFinding:
     pk = (data["ticker"], data["scan_date"])
     existing = session.get(AgentInsiderFinding, pk)
     if existing is None:
@@ -500,7 +509,9 @@ def upsert_catalyst(session: Session, data: dict[str, Any]) -> Catalyst:
     return existing
 
 
-def upsert_volatility_finding(session: Session, data: dict[str, Any]) -> AgentVolatilityFinding:
+def upsert_volatility_finding(
+    session: Session, data: dict[str, Any]
+) -> AgentVolatilityFinding:
     pk = (data["ticker"], data["scan_date"])
     existing = session.get(AgentVolatilityFinding, pk)
     if existing is None:
@@ -524,7 +535,9 @@ def upsert_partnership(session: Session, data: dict[str, Any]) -> Partnership:
     return existing
 
 
-def upsert_smart_money_finding(session: Session, data: dict[str, Any]) -> AgentSmartMoneyFinding:
+def upsert_smart_money_finding(
+    session: Session, data: dict[str, Any]
+) -> AgentSmartMoneyFinding:
     pk = (data["ticker"], data["scan_date"])
     existing = session.get(AgentSmartMoneyFinding, pk)
     if existing is None:
@@ -536,7 +549,9 @@ def upsert_smart_money_finding(session: Session, data: dict[str, Any]) -> AgentS
     return existing
 
 
-def upsert_smart_money_position(session: Session, data: dict[str, Any]) -> SmartMoneyPosition:
+def upsert_smart_money_position(
+    session: Session, data: dict[str, Any]
+) -> SmartMoneyPosition:
     pk = (data["ticker"], data["institution_name"], data["filing_date"])
     existing = session.get(SmartMoneyPosition, pk)
     if existing is None:
@@ -548,7 +563,9 @@ def upsert_smart_money_position(session: Session, data: dict[str, Any]) -> Smart
     return existing
 
 
-def upsert_investment_memo(session: Session, data: dict[str, Any]) -> AgentInvestmentMemo:
+def upsert_investment_memo(
+    session: Session, data: dict[str, Any]
+) -> AgentInvestmentMemo:
     pk = (data["ticker"], data["memo_date"])
     existing = session.get(AgentInvestmentMemo, pk)
     if existing is None:
@@ -564,20 +581,22 @@ def upsert_investment_memo(session: Session, data: dict[str, Any]) -> AgentInves
 # News Articles (REQ-087–REQ-091)
 # ---------------------------------------------------------------------------
 
-_CATEGORY_PATTERNS: list[tuple[str, str]] = [
-    (r"acqui|merger|buy.*out|takeover", "m&a"),
-    (r"ASCO|ASH|JPM|AACR|ESMO|EHA", "conference"),
-    (r"upgrade|downgrade|price target|initiates", "analyst"),
-    (r"partnership|collaboration|licens|royalt", "partnership"),
-    (r"FDA|PDUFA|NDA|BLA|accelerated approval", "fda"),
+_CATEGORY_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"acqui|merger|buy.*out|takeover", re.IGNORECASE), "m&a"),
+    (re.compile(r"ASCO|ASH|JPM|AACR|ESMO|EHA", re.IGNORECASE), "conference"),
+    (re.compile(r"upgrade|downgrade|price target|initiates", re.IGNORECASE), "analyst"),
+    (
+        re.compile(r"partnership|collaboration|licens|royalt", re.IGNORECASE),
+        "partnership",
+    ),
+    (re.compile(r"FDA|PDUFA|NDA|BLA|accelerated approval", re.IGNORECASE), "fda"),
 ]
 
 
 def _categorize_headline(headline: str) -> str | None:
     """REQ-089: assign category from headline via regex."""
-    import re
     for pattern, category in _CATEGORY_PATTERNS:
-        if re.search(pattern, headline, re.IGNORECASE):
+        if pattern.search(headline):
             return category
     return None
 
@@ -595,7 +614,7 @@ def insert_news_article(session: Session, data: dict[str, Any]) -> NewsArticle |
     try:
         obj = NewsArticle(**{k: v for k, v in data.items() if v is not None})
         session.add(obj)
-        session.flush()   # surface IntegrityError from UNIQUE constraint immediately
+        session.flush()  # surface IntegrityError from UNIQUE constraint immediately
         return obj
     except IntegrityError:
         session.rollback()
@@ -617,20 +636,20 @@ def associate_news_tickers(session: Session) -> int:
         )
     ).all()
 
-    untagged = session.exec(
-        select(NewsArticle).where(NewsArticle.ticker == None)
-    ).all()
+    untagged = session.exec(select(NewsArticle).where(NewsArticle.ticker == None)).all()
 
     # Pre-compute valid lowercased names and tickers to avoid O(N*M) string allocations
     valid_companies = []
     for co in companies:
         name = co.company_name or ""
         if len(name) >= 5:
-            valid_companies.append({
-                "ticker": co.ticker,
-                "ticker_lower": co.ticker.lower(),
-                "name_lower": name.lower(),
-            })
+            valid_companies.append(
+                {
+                    "ticker": co.ticker,
+                    "ticker_lower": co.ticker.lower(),
+                    "name_lower": name.lower(),
+                }
+            )
 
     count = 0
     for article in untagged:
@@ -674,9 +693,7 @@ def get_metadata(session: Session, key: str) -> str | None:
 
 def get_active_tickers(session: Session) -> list[str]:
     """Return all active tickers. REQ-071: ingestion scripts filter is_active = 1."""
-    rows = session.exec(
-        select(Company).where(Company.is_active == True)
-    ).all()
+    rows = session.exec(select(Company).where(Company.is_active == True)).all()
     return [r.ticker for r in rows]
 
 
