@@ -7,6 +7,7 @@ REQ-004: DatabaseWriteTool never overwrites existing non-NULL values with NULL.
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -14,6 +15,9 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 DB_PATH = os.environ.get("DB_PATH", "biotech_tracker.db")
+
+# Strict identifier validation to prevent SQL injection in dynamically built queries
+IDENTIFIER_REGEX = re.compile(r"^[a-zA-Z0-9_]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +124,11 @@ class DatabaseWriteTool(BaseTool):
             if not clean_data:
                 return "Warning: No non-null values to write."
 
+            # Validate column names to prevent SQL injection
+            for col in clean_data.keys():
+                if not IDENTIFIER_REGEX.match(col):
+                    return f"Error: Invalid column name '{col}'."
+
             cols = ", ".join(clean_data.keys())
             placeholders = ", ".join(["?"] * len(clean_data))
             conflict_target = ", ".join(pk_cols)
@@ -203,6 +212,11 @@ class DatabasePatchTool(BaseTool):
             if operation not in ("append", "set_key"):
                 return "Error: operation must be 'append' or 'set_key'."
 
+            if not IDENTIFIER_REGEX.match(pk_column):
+                return f"Error: Invalid pk_column name '{pk_column}'."
+            if not IDENTIFIER_REGEX.match(json_column):
+                return f"Error: Invalid json_column name '{json_column}'."
+
             value_json = json.dumps(value_dict)
             with sqlite3.connect(self.db_path) as conn:
                 if operation == "append":
@@ -214,6 +228,8 @@ class DatabasePatchTool(BaseTool):
                     conn.execute(sql, [value_json, pk_value])
                 else:  # set_key
                     key = list(value_dict.keys())[0]
+                    if not IDENTIFIER_REGEX.match(key):
+                        return f"Error: Invalid JSON key '{key}'."
                     val = list(value_dict.values())[0]
                     val_json = json.dumps(val)
                     sql = (

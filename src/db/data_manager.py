@@ -581,21 +581,24 @@ def upsert_investment_memo(
 # News Articles (REQ-087–REQ-091)
 # ---------------------------------------------------------------------------
 
-_CATEGORY_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"acqui|merger|buy.*out|takeover", re.IGNORECASE), "m&a"),
-    (re.compile(r"ASCO|ASH|JPM|AACR|ESMO|EHA", re.IGNORECASE), "conference"),
-    (re.compile(r"upgrade|downgrade|price target|initiates", re.IGNORECASE), "analyst"),
-    (
-        re.compile(r"partnership|collaboration|licens|royalt", re.IGNORECASE),
-        "partnership",
-    ),
-    (re.compile(r"FDA|PDUFA|NDA|BLA|accelerated approval", re.IGNORECASE), "fda"),
+import re
+
+_CATEGORY_PATTERNS_COMPILED = [
+    (re.compile(p, re.IGNORECASE), c) for p, c in [
+        (r"acqui|merger|buy.*out|takeover", "m&a"),
+        (r"ASCO|ASH|JPM|AACR|ESMO|EHA", "conference"),
+        (r"upgrade|downgrade|price target|initiates", "analyst"),
+        (r"partnership|collaboration|licens|royalt", "partnership"),
+        (r"FDA|PDUFA|NDA|BLA|accelerated approval", "fda"),
+    ]
 ]
 
 
 def _categorize_headline(headline: str) -> str | None:
     """REQ-089: assign category from headline via regex."""
-    for pattern, category in _CATEGORY_PATTERNS:
+    # Performance optimization: use pre-compiled module-level regex objects
+    # instead of repeated re.search which recompiles patterns inside the loop
+    for pattern, category in _CATEGORY_PATTERNS_COMPILED:
         if pattern.search(headline):
             return category
     return None
