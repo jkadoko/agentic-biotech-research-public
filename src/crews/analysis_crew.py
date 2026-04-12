@@ -27,16 +27,21 @@ log = logging.getLogger(__name__)
 
 
 def _get_primary_nct_id(ticker: str) -> str | None:
-    """Fetch the highest-priority active Phase 3 NCT ID for this ticker."""
+    """Fetch the highest-priority active Phase 3 NCT ID for this ticker.
+
+    Uses trial_pipeline as the ticker→NCT linkage table (studies has no ticker column).
+    """
     try:
-        from src.db.models import Study
+        from src.db.models import Study, TrialPipeline
         from sqlmodel import select
         with get_session() as session:
             row = session.exec(
-                select(Study.nct_id).where(
-                    Study.ticker == ticker,
+                select(Study.nct_id)
+                .join(TrialPipeline, TrialPipeline.nct_id == Study.nct_id)
+                .where(
+                    TrialPipeline.ticker == ticker,
                     Study.phase == "PHASE3",
-                    Study.status.in_(["ACTIVE_NOT_RECRUITING", "ACTIVE_RECRUITING", "COMPLETED"]),
+                    Study.status.in_(["ACTIVE_NOT_RECRUITING", "RECRUITING", "COMPLETED"]),
                 ).order_by(Study.primary_completion_date.desc())
             ).first()
             return row
@@ -83,7 +88,7 @@ def run_analysis_crew(ticker: str, nct_id: str | None = None) -> dict:
     crew = Crew(
         agents=[profiler, peer_reviewer, insider, partnership, smart_money],
         tasks=tasks,
-        process=Process.sequential,
+        process=Process.parallel,
         verbose=False,
     )
 

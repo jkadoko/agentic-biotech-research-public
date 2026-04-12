@@ -15,7 +15,7 @@ services:
       - DB_PATH=/app/biotech_tracker.db
       - OUTPUT_DIR=/app/output
       - OLLAMA_HOST_GPU0=http://ollama-gpu0:11434
-      - OLLAMA_HOST_GPU1=http://ollama-gpu1:11435
+      - OLLAMA_HOST_GPU1=http://ollama-gpu1:11434
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8000
     depends_on:
@@ -35,7 +35,7 @@ services:
       - DB_PATH=/app/biotech_tracker.db
       - OUTPUT_DIR=/app/output
       - OLLAMA_HOST_GPU0=http://ollama-gpu0:11434
-      - OLLAMA_HOST_GPU1=http://ollama-gpu1:11435
+      - OLLAMA_HOST_GPU1=http://ollama-gpu1:11434
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8000
     depends_on:

@@ -31,8 +31,8 @@ engine = create_engine(
     connect_args=_connect_args,
     echo=False,
     pool_pre_ping=True,  # Verify connections before use
-    pool_size=5,
-    max_overflow=10,
+    pool_size=10,
+    max_overflow=20,
 )
 
 
@@ -77,14 +77,14 @@ class Company(SQLModel, table=True):
     book_value_per_share: Optional[float] = None
     week52_high: Optional[float] = None
     week52_low: Optional[float] = None
-    # REQ-066: MAX(cash_per_share, book_value_per_share, 52wk_low × 0.90)
+    # REQ-066: MAX(cash_per_share, book_value_per_share, week52_low × 0.90)
     floor_price: Optional[float] = None
     runway_months: Optional[int] = None
     burn_rate_monthly_usd: Optional[float] = None
     listing_date: Optional[date] = None
     added_by: Optional[str] = None          # MANUAL | SCOUT_AUTO
     is_active: Optional[bool] = Field(default=True)   # REQ-071
-    last_10k_parsed: Optional[date] = None
+    last_filing_parsed: Optional[date] = None  # Supports both 10-K and 20-F filings
     onboarding_status: Optional[str] = None  # PENDING | COMPLETE | FAILED | STALE
     watchlist_flags: Optional[str] = None   # JSON array of {flag, source, headline, source_url, detected_at}
     last_updated: Optional[datetime] = Field(default_factory=datetime.utcnow)
@@ -281,7 +281,7 @@ class SecFiling(SQLModel, table=True):
 
     ticker: str = Field(primary_key=True, foreign_key="companies.ticker")
     filing_date: date = Field(primary_key=True)
-    filing_type: str = Field(primary_key=True)  # 10-K | 10-Q | 8-K | Form 4 | SC 13G | SC 13D
+    filing_type: str = Field(primary_key=True)  # 10-K | 10-Q | 8-K | S-1 | F-1 | Form 4 | SC 13G | SC 13D
     edgar_url: Optional[str] = None
     local_rag_source_id: Optional[str] = None   # ChromaDB source ID
     uploaded_to_rag: Optional[bool] = Field(default=False)

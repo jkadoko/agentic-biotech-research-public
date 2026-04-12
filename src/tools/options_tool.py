@@ -50,7 +50,8 @@ class OptionsChainTool(BaseTool):
 
             now = datetime.utcnow()
             eligible_expiries = [
-                exp for exp in tk.options
+                exp
+                for exp in tk.options
                 if (datetime.strptime(exp, "%Y-%m-%d") - now).days <= max_dte
             ]
 
@@ -58,28 +59,39 @@ class OptionsChainTool(BaseTool):
             for exp in eligible_expiries:
                 try:
                     chain = tk.option_chain(exp)
-                    contracts = chain.puts if option_type.upper() == "PUT" else chain.calls
+                    contracts = (
+                        chain.puts if option_type.upper() == "PUT" else chain.calls
+                    )
                     dte = (datetime.strptime(exp, "%Y-%m-%d") - now).days
 
-                    for _, row in contracts.iterrows():
+                    # ⚡ Bolt: Fast iteration using to_dict('records') instead of slow df.iterrows()
+                    for row in contracts.to_dict("records"):
                         oi = int(row.get("openInterest") or 0)
                         iv = float(row.get("impliedVolatility") or 0) or None
                         bid = float(row.get("bid") or 0) or None
                         ask = float(row.get("ask") or 0) or None
                         strike = float(row.get("strike") or 0)
 
-                        results.append({
-                            "expiration": exp,
-                            "strike": strike,
-                            "bid": bid,
-                            "ask": ask,
-                            "mid": round((bid + ask) / 2, 4) if bid and ask else None,
-                            "iv": iv,
-                            "open_interest": oi,
-                            "dte": dte,
-                            # Derived checks for Volatility agent
-                            "spread_pct": round((ask - bid) / ask, 4) if ask and ask > 0 else None,
-                        })
+                        results.append(
+                            {
+                                "expiration": exp,
+                                "strike": strike,
+                                "bid": bid,
+                                "ask": ask,
+                                "mid": (
+                                    round((bid + ask) / 2, 4) if bid and ask else None
+                                ),
+                                "iv": iv,
+                                "open_interest": oi,
+                                "dte": dte,
+                                # Derived checks for Volatility agent
+                                "spread_pct": (
+                                    round((ask - bid) / ask, 4)
+                                    if ask and ask > 0
+                                    else None
+                                ),
+                            }
+                        )
                 except Exception:
                     continue  # Skip problematic expiry dates
 

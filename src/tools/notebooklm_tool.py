@@ -1,3 +1,15 @@
+"""
+DEPRECATED — do not use in new code.
+
+This file is retained as a historical reference only. Google NotebookLM was
+removed as a primary extraction source in PRD v3.0 and replaced by local
+ChromaDB + Ollama (llama3.1:8b) for all 10-K and 20-F extraction tasks.
+The canonical extraction pipeline is in scripts/onboard_company.py (Step 3–4).
+
+No agent spec or CREWAI_TOOLS.md references this tool.
+If you need external-dependency-free extraction, use LocalRAGTool + OllamaLLMTool.
+"""
+
 import asyncio
 import json
 import logging

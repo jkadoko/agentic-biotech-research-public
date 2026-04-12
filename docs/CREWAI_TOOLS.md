@@ -1,8 +1,8 @@
 # CrewAI Shared Tools Catalog
 
-**Version:** 2.1
-**Last Updated:** 2026-03-15
-**Aligned with:** PRD v3.5y
+**Version:** 2.2
+**Last Updated:** 2026-04-11
+**Aligned with:** PRD v3.5z
 **Purpose:** Documents every shared tool available to CrewAI agents. Each tool is a Python class that implements the CrewAI `BaseTool` interface. Agents declare which tools they use in their `tools` list parameter.
 
 ---
@@ -123,12 +123,24 @@ class DatabaseWriteInput(BaseModel):
 # MUST match SCHEMA.md exactly — SQLite's ON CONFLICT clause uses the actual PK constraint.
 # Composite PKs are expressed as a list. All values must be present in the data dict.
 PRIMARY_KEY_MAP: dict = {
-    # SCHEMA.md Section 3: Entity Resolution
+    # SCHEMA.md Section 1: Core Reference
+    "companies":                  ["ticker"],                            # PK: ticker TEXT
     "entity_aliases":             ["alias"],                             # PK: alias TEXT
     # SCHEMA.md Section 4: Disease Epidemiology
     "disease_context":            ["condition_normalized"],              # PK: condition_normalized TEXT
-    # SCHEMA.md Section 2: Clinical Trials (Linkage)
+    # SCHEMA.md Section 2: Clinical Trials
+    "studies":                    ["nct_id"],                            # PK: nct_id TEXT
     "trial_pipeline":             ["ticker", "nct_id"],                  # PK: (ticker, nct_id)
+    "conditions":                 ["nct_id", "condition_name"],          # PK: (nct_id, condition_name)
+    "interventions":              ["nct_id", "drug_name"],               # PK: (nct_id, drug_name)
+    "collaborators":              ["nct_id", "collaborator_name"],       # PK: (nct_id, collaborator_name)
+    "design_outcomes":            ["nct_id", "outcome_type", "measure"], # PK: (nct_id, outcome_type, measure)
+    # Supporting tables
+    "orphan":                     ["ticker", "drug_name"],               # PK: (ticker, drug_name)
+    "sec_filings":                ["ticker", "filing_date", "filing_type"], # PK: (ticker, filing_date, filing_type)
+    "company_onboarding_log":     ["ticker", "onboarding_date"],         # PK: (ticker, onboarding_date)
+    # SCHEMA.md Section 9: News
+    "news_articles":              ["url"],                               # PK: url TEXT — agents cannot provide AUTOINCREMENT id
     # SCHEMA.md Section 8: Agent Output Tables
     "agent_profiler_findings":    ["ticker", "profile_date"],            # PK: (ticker, profile_date)
     "agent_scientific_audits":    ["ticker", "nct_id", "audit_date"],    # PK: (ticker, nct_id, audit_date)
@@ -137,13 +149,8 @@ PRIMARY_KEY_MAP: dict = {
     "agent_volatility_findings":  ["ticker", "scan_date"],               # PK: (ticker, scan_date)
     "partnerships":               ["ticker", "partner_name", "drug_asset"],# PK: (ticker, partner_name, drug_asset)
     "agent_smart_money_findings": ["ticker", "scan_date"],               # PK: (ticker, scan_date)
-    "agent_investment_memos":     ["ticker", "memo_date"],               # PK: (ticker, memo_date)
-    # SCHEMA.md Section 1: Core Reference
-    "companies":                  ["ticker"],                            # PK: ticker TEXT
-    # SCHEMA.md Section 8: Agent Output Tables (cont.)
     "smart_money_positions":      ["ticker", "institution_name", "filing_date"],  # PK: (ticker, institution_name, filing_date)
-    # SCHEMA.md Section 9: News
-    "news_articles":              ["id"],                                # PK: id INTEGER (auto-increment)
+    "agent_investment_memos":     ["ticker", "memo_date"],               # PK: (ticker, memo_date)
 }
 
 class DatabaseWriteTool(BaseTool):
@@ -263,10 +270,11 @@ patch_tool._run(
     json_column="watchlist_flags",
     operation="append",
     value_dict={
-        "flag": "MA_RUMOR",
+        "flag": "MA_RUMOR_FLAG",
         "direction": "TARGET",
+        "source": "RSS_NEWS",
         "headline": "Pfizer rumored to be eyeing Moderna acquisition",
-        "source": "BioPharma Dive",
+        "source_url": "https://www.biopharmadive.com/...",
         "detected_at": "2026-03-14T08:30:00"
     }
 )
@@ -289,9 +297,11 @@ class LocalRAGQueryInput(BaseModel):
                     "Example: 'What are the key patent risks in MRNA latest 10-K?'"
     )
     collection: str = Field(
-        description="ChromaDB collection to query. Options: 'sec_filings', 'agent_memos', "
-                    "'trial_protocols', or a therapeutic area (e.g., 'oncology', 'neurology'). "
-                    "Use 'sec_filings' for 10-K/8-K/Form4. Use 'agent_memos' for historical recommendations."
+        description="ChromaDB collection to query. Valid values: 'sec_filings', 'agent_memos', "
+                    "'trial_protocols'. "
+                    "Use 'sec_filings' for 10-K/8-K/Form4. Use 'agent_memos' for historical recommendations. "
+                    "Use 'trial_protocols' for clinical protocol documents. "
+                    "Therapeutic area filtering is done via metadata (ticker/condition), not separate collections."
     )
     ticker: str = Field(default=None, description="Optional: scope the search to a specific ticker")
 
@@ -376,7 +386,8 @@ class SECEdgarFetcherTool(BaseTool):
                     "form": form,
                     "date": filings["filingDate"][i],
                     "accession": filings["accessionNumber"][i],
-                    "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{filings['accessionNumber'][i].replace('-','')}"
+                    # URL must include the primary document filename — accession folder alone returns 404
+                    "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{filings['accessionNumber'][i].replace('-','')}/{filings['primaryDocument'][i]}"
                 })
         return json.dumps(results)
 ```
@@ -517,7 +528,7 @@ class OptionsChainTool(BaseTool):
                     "bid": row["bid"],
                     "ask": row["ask"],
                     "iv": row.get("impliedVolatility"),
-                    "open_interest": row.get("openInterest"),
+                    "open_interest": row.get("openInterest"),  # yfinance key → schema column
                     "dte": (datetime.strptime(exp, "%Y-%m-%d") - datetime.now()).days
                 })
         return json.dumps(results)
@@ -544,6 +555,14 @@ class OllamaInferenceInput(BaseModel):
     )
     temperature: float = Field(default=0.1, description="Temperature (0.0–1.0). Use 0.0–0.1 for structured extraction.")
 
+# GPU routing — models are automatically dispatched to the correct GPU host
+_MODEL_HOST_MAP = {
+    "deepseek-r1:7b-q4_K_M": OLLAMA_HOST_GPU1,  # GPU1: reasoning model (Strategist)
+    "llama3.2:3b":            OLLAMA_HOST_GPU1,  # GPU1: fast extraction (Partnership)
+    "llama3.1:8b":            OLLAMA_HOST_GPU0,  # GPU0: primary model (most agents)
+    "mxbai-embed-large:latest": OLLAMA_HOST_GPU0, # GPU0: embeddings (ChromaDB)
+}
+
 class OllamaLLMTool(BaseTool):
     name: str = "ollama_inference"
     description: str = (
@@ -553,12 +572,14 @@ class OllamaLLMTool(BaseTool):
         "All data processed here stays on-premises."
     )
     args_schema: type[BaseModel] = OllamaInferenceInput
-    ollama_host: str = "http://ollama-gpu0:11434"
+    ollama_host: str = "http://ollama-gpu1:11435"  # Default to GPU1 (deepseek-r1 home)
 
     def _run(self, prompt: str, model: str = "deepseek-r1:7b-q4_K_M", temperature: float = 0.1) -> str:
-        import requests, json
+        import requests
+        # Route model to correct GPU — deepseek/llama3.2 → GPU1, llama3.1 → GPU0
+        host = _MODEL_HOST_MAP.get(model, self.ollama_host)
         payload = {"model": model, "prompt": prompt, "temperature": temperature, "stream": False}
-        resp = requests.post(f"{self.ollama_host}/api/generate", json=payload, timeout=120)
+        resp = requests.post(f"{host}/api/generate", json=payload, timeout=180)  # 3min for deepseek-r1
         return resp.json().get("response", "")
 ```
 
@@ -567,7 +588,7 @@ class OllamaLLMTool(BaseTool):
 |---|---|---|
 | `llama3.1:8b` | ~5.5 GB | Primary model: onboarding 10-K extraction, most agent tasks |
 | `deepseek-r1:7b-q4_K_M` | ~4.5 GB | Strategist reasoning chains (q4 quantized) |
-| `llama3.2:3b` | ~2.0 GB | Low-latency: Partnership NLP extraction, Volatility |
+| `llama3.2:3b` | ~2.0 GB | Low-latency: Partnership NLP extraction |
 | `deepseek-r1:7b-q4_K_M` + `llama3.2:3b` simultaneously | ~6.5 GB | Fits on single P4 |
 | `llama3.1:8b` | ~5.5 GB | Runs on GPU1 while GPU0 runs deepseek-r1 |
 | `deepseek-r1:70b` | ~40+ GB | NOT FEASIBLE on P4 — do not attempt |

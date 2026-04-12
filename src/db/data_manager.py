@@ -50,7 +50,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 def retry_on_db_lock(
-    max_attempts: int = 3, initial_delay: float = 0.5
+    max_attempts: int = 5, initial_delay: float = 1.0
 ) -> Callable[[F], F]:
     """
     Decorator to retry database operations on OperationalError (database locked).
@@ -641,24 +641,32 @@ def associate_news_tickers(session: Session) -> int:
 
     untagged = session.exec(select(NewsArticle).where(NewsArticle.ticker == None)).all()
 
-    # Pre-compute valid lowercased names and tickers to avoid O(N*M) string allocations
+    # Pre-compute valid lowercased names and word-boundary ticker patterns (REQ-088).
+    # Short tickers (≤2 chars) are excluded from substring matching — they produce too many
+    # false positives (e.g., ticker "A" matches any headline containing the letter "a").
     valid_companies = []
     for co in companies:
         name = co.company_name or ""
+        ticker = co.ticker or ""
         if len(name) >= 5:
+            # Word-boundary pattern prevents "AMP" matching "example" or "camp"
+            ticker_pattern = re.compile(r"\b" + re.escape(ticker.upper()) + r"\b") if len(ticker) >= 3 else None
             valid_companies.append(
                 {
-                    "ticker": co.ticker,
-                    "ticker_lower": co.ticker.lower(),
+                    "ticker": ticker,
+                    "ticker_pattern": ticker_pattern,
                     "name_lower": name.lower(),
                 }
             )
 
     count = 0
     for article in untagged:
-        hl = article.headline.lower()
+        hl_lower = article.headline.lower()
+        hl_upper = article.headline.upper()
         for co in valid_companies:
-            if co["name_lower"] in hl or co["ticker_lower"] in hl:
+            name_match = co["name_lower"] in hl_lower
+            ticker_match = co["ticker_pattern"] is not None and bool(co["ticker_pattern"].search(hl_upper))
+            if name_match or ticker_match:
                 article.ticker = co["ticker"]
                 session.add(article)
                 count += 1

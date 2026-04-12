@@ -43,7 +43,7 @@ class ClinicalTrialsTool(BaseTool):
         "Search ClinicalTrials.gov API v2 for clinical trials. "
         "Use to find: trial status for a company, competitor trials in an indication, "
         "ACTIVE_NOT_RECRUITING Phase 3 trials (NDA candidates), terminated trials. "
-        "Returns NCT ID, title, phase, status, sponsor, completion dates."
+        "Returns NCT ID, title, phase, status, sponsor, collaborators (name + class), completion dates."
     )
     args_schema: type[BaseModel] = ClinicalTrialsQueryInput
 
@@ -80,6 +80,16 @@ class ClinicalTrialsTool(BaseTool):
                 design_mod = ps.get("designModule", {})
                 sponsor_mod = ps.get("sponsorCollaboratorsModule", {})
 
+                # Extract collaborators for partnership detection (Agent 010 Task A)
+                raw_collabs = sponsor_mod.get("collaborators", [])
+                collaborators = [
+                    {
+                        "name": c.get("name"),
+                        "class": c.get("class"),   # INDUSTRY | NIH | NETWORK | OTHER
+                    }
+                    for c in raw_collabs
+                ]
+
                 results.append({
                     "nct_id": id_mod.get("nctId"),
                     "title": id_mod.get("briefTitle"),
@@ -87,6 +97,7 @@ class ClinicalTrialsTool(BaseTool):
                     "status": status_mod.get("overallStatus"),
                     "sponsor": sponsor_mod.get("leadSponsor", {}).get("name"),
                     "sponsor_class": sponsor_mod.get("leadSponsor", {}).get("class"),
+                    "collaborators": collaborators,
                     "completion_date": status_mod.get("primaryCompletionDateStruct", {}).get("date"),
                     "enrollment": design_mod.get("enrollmentInfo", {}).get("count"),
                 })

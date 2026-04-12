@@ -67,8 +67,12 @@ class OllamaLLMTool(BaseTool):
         temperature: float = 0.1,
     ) -> str:
         try:
-            # Route to correct GPU based on model
-            host = _MODEL_HOST_MAP.get(model, self.ollama_host)
+            # Route to correct GPU based on model.
+            # If the user has changed the host from the module-level default, use that.
+            # Otherwise, use the model host map.
+            host = self.ollama_host
+            if host == OLLAMA_HOST_GPU1 and model in _MODEL_HOST_MAP:
+                host = _MODEL_HOST_MAP[model]
             payload = {
                 "model": model,
                 "prompt": prompt,

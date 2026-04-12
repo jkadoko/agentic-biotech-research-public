@@ -6,14 +6,14 @@ Crew: Analysis (Crew 2)
 Model: llama3.1:8b (Ollama GPU0)
 
 Audits clinical trial results for statistical rigor, endpoint integrity, and
-clinical significance. Produces science_score (0–100) and verdict.
+clinical significance. Produces validity_score (0–100) and verdict.
 
 Scoring:
   25 protocol integrity + 30 statistical validity + 20 clinical significance
   + 10 sample size - 25 red flags + 15 market size = 0–100
 
-Verdicts: STRONG_SCIENCE (≥75) | SOLID (55–74) | WEAK (35–54) | VERY_WEAK (15–34)
-          | FRAUD_RISK (<15 or active red flag)
+Verdicts: STRONG_SCIENCE (≥80) | SOLID (60–79) | WEAK (40–59) | VERY_WEAK (20–39)
+          | FRAUD_RISK (<20 or active red flag)
 """
 
 import os
@@ -22,6 +22,7 @@ from crewai import Agent, LLM, Task
 
 from src.tools.clinicaltrials_tool import ClinicalTrialsTool
 from src.tools.db_tool import DatabaseQueryTool, DatabaseWriteTool
+from src.tools.local_rag_tool import LocalRAGTool
 from src.tools.search_tool import DuckDuckGoSearchTool
 
 _GPU0 = os.environ.get("OLLAMA_HOST_GPU0", "http://ollama-gpu0:11434")
@@ -48,7 +49,7 @@ def make_peer_reviewer_agent() -> Agent:
             "Audit clinical trial protocols and results for statistical integrity, "
             "endpoint hierarchy compliance, and clinical significance vs. standard of care. "
             "Detect endpoint switching, p-hacking, and underpowered studies. "
-            "Assign a science_score (0–100) and verdict that the Strategist can trust."
+            "Assign a validity_score (0–100) and verdict that the Strategist can trust."
         ),
         backstory=(
             "You are a former academic oncologist turned drug development consultant who "
@@ -62,6 +63,7 @@ def make_peer_reviewer_agent() -> Agent:
         tools=[
             DatabaseQueryTool(),
             DatabaseWriteTool(),
+            LocalRAGTool(),
             DuckDuckGoSearchTool(),
             ClinicalTrialsTool(),
         ],
@@ -79,7 +81,7 @@ def make_peer_reviewer_task(agent: Agent, ticker: str, nct_id: str) -> Task:
             "TASK A — Protocol Integrity Check (0–25 pts):\n"
             "  STEP 1: Fetch current protocol from ClinicalTrialsTool (by nct_id).\n"
             "  STEP 2: Query historical endpoint data:\n"
-            "    DatabaseQueryTool: SELECT outcome_type, outcome_measure, time_frame "
+            "    DatabaseQueryTool: SELECT outcome_type, measure "
             "    FROM design_outcomes WHERE nct_id = '{nct_id}' ORDER BY outcome_type.\n"
             "  STEP 3: Detect endpoint switching:\n"
             "    - Compare current primary_outcome vs. original registration.\n"
@@ -114,7 +116,7 @@ def make_peer_reviewer_task(agent: Agent, ticker: str, nct_id: str) -> Task:
             "    +3: Non-inferior with similar safety\n"
             "    +0: No clear advantage over SoC\n\n"
             "TASK D — Sample Size Adequacy (0–10 pts):\n"
-            "  - DatabaseQueryTool: SELECT enrollment_count FROM studies WHERE nct_id = '{nct_id}'.\n"
+            "  - DatabaseQueryTool: SELECT enrollment FROM studies WHERE nct_id = '{nct_id}'.\n"
             "  - 10 pts: enrollment ≥ 300 (well-powered Phase 3)\n"
             "  - 7 pts: 150–299\n"
             "  - 4 pts: 50–149 (underpowered risk)\n"
@@ -127,23 +129,25 @@ def make_peer_reviewer_task(agent: Agent, ticker: str, nct_id: str) -> Task:
             "  - FDA complete response letter (CRL) history: -15 pts\n"
             "  - Active FDA warning letter: -25 pts, FRAUD_RISK trigger\n\n"
             "TASK F — Market Size Bonus (0–15 pts):\n"
-            "  - DatabaseQueryTool: SELECT tam_usd FROM disease_context WHERE ticker = '{ticker}'.\n"
-            "  - 15 pts: TAM > $5B | 10 pts: $1–5B | 5 pts: $500M–1B | 0 pts: <$500M\n\n"
-            "SCORING: science_score = A + B + C + D - E_penalties + F (cap 0–100).\n"
+            "  - DatabaseQueryTool: SELECT prevalence_us FROM disease_context "
+            "    WHERE condition_normalized = '{indication}'.\n"
+            "  - 15 pts: prevalence_us > 1,000,000 | 10 pts: 200,000–1,000,000 "
+            "    | 5 pts: 50,000–200,000 (orphan) | 0 pts: < 50,000\n\n"
+            "SCORING: validity_score = A + B + C + D - E_penalties + F (cap 0–100).\n"
             "VERDICT:\n"
-            "  STRONG_SCIENCE: ≥75 | SOLID: 55–74 | WEAK: 35–54 | VERY_WEAK: 15–34\n"
-            "  FRAUD_RISK: <15 OR active FDA warning letter OR ENDPOINT_SWITCH + p>0.05\n\n"
+            "  STRONG_SCIENCE: ≥80 | SOLID: 60–79 | WEAK: 40–59 | VERY_WEAK: 20–39\n"
+            "  FRAUD_RISK: <20 OR active FDA warning letter OR ENDPOINT_SWITCH + p>0.05\n\n"
             "Write to agent_scientific_audits via DatabaseWriteTool:\n"
-            "  ticker, nct_id, science_score, verdict, competitive_advantage,\n"
-            "  endpoint_switched (bool), red_flags (JSON array).\n\n"
-            "Return JSON: {\"ticker\": str, \"nct_id\": str, \"science_score\": int, "
+            "  ticker, nct_id, audit_date=today, validity_score, verdict, competitive_advantage,\n"
+            "  endpoint_switching_detected (bool), red_flags (JSON array).\n\n"
+            "Return JSON: {\"ticker\": str, \"nct_id\": str, \"validity_score\": int, "
             "\"verdict\": str, \"competitive_advantage\": str, "
-            "\"endpoint_switched\": bool, \"red_flags\": [str]}"
+            "\"endpoint_switching_detected\": bool, \"red_flags\": [str]}"
         ),
         expected_output=(
-            "JSON with ticker, nct_id, science_score (0–100), verdict "
+            "JSON with ticker, nct_id, validity_score (0–100), verdict "
             "(STRONG_SCIENCE|SOLID|WEAK|VERY_WEAK|FRAUD_RISK), competitive_advantage "
-            "(SUPERIOR|FIRST_MOVER|COMPARABLE|INFERIOR), endpoint_switched (bool), "
+            "(SUPERIOR|FIRST_MOVER|COMPETITIVE|INFERIOR), endpoint_switching_detected (bool), "
             "and red_flags list."
         ),
         agent=agent,

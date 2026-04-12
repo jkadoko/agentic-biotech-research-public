@@ -11,9 +11,9 @@ Excludes: Code F (tax withholding), Code D (derivative), Code A (award/grant).
 
 Conviction Score (1–10):
   Base 5 + modifiers:
-    CEO/CFO +2, CMO +2, >$500k purchase +2, >$100k +1,
-    cluster (3+ insiders 30 days) +2, near 52wk low +1,
-    held >30 days confirmed +1, 10b5-1 plan -3
+    CEO/President +2, CMO +2, >$500k purchase +2, >$100k +1,
+    cluster (3+ insiders 30 days) +2, within 5% of 52wk low +1,
+    held >30 days confirmed +1, same-day exercise+sell -2, 10b5-1 plan -3
 """
 
 import os
@@ -21,7 +21,7 @@ import os
 from crewai import Agent, LLM, Task
 
 from src.tools.db_tool import DatabaseQueryTool, DatabaseWriteTool
-from src.tools.search_tool import DuckDuckGoSearchTool
+from src.tools.local_rag_tool import LocalRAGTool
 from src.tools.sec_edgar_tool import SECEdgarFetcherTool
 
 _GPU0 = os.environ.get("OLLAMA_HOST_GPU0", "http://ollama-gpu0:11434")
@@ -48,7 +48,7 @@ def make_insider_agent() -> Agent:
         tools=[
             DatabaseQueryTool(),
             DatabaseWriteTool(),
-            DuckDuckGoSearchTool(),
+            LocalRAGTool(),
             SECEdgarFetcherTool(),
         ],
         llm=llm,
@@ -72,7 +72,8 @@ def make_insider_task(agent: Agent, ticker: str) -> Task:
             "    Code F = tax withholding on RSU vesting (exclude)\n"
             "    Code D = derivative exercise (exclude unless accompanied by Code P)\n"
             "    Code A = award/grant (exclude)\n"
-            "    Code M = option exercise (exclude unless Code S follows within 30 days)\n"
+            "    Code M = option exercise (INCLUDE if shares were HELD — no offsetting Code S within 30 days;\n"
+            "             EXCLUDE if Code S follows within 30 days = cashless exercise, not a buy signal)\n"
             "  SELL signals (track separately):\n"
             "    Code S = open-market sale\n"
             "    Note: Code S is only bearish if NOT preceded by 10b5-1 plan registration.\n\n"
@@ -85,34 +86,35 @@ def make_insider_task(agent: Agent, ticker: str) -> Task:
             "  - A MINI_CLUSTER = 2 unique insiders with Code P within 30 days.\n"
             "  - Single insider = SINGLE_BUY (or STRONG_BUY if amount > $500k).\n\n"
             "STEP 5 — Conviction Scoring (base 5, range 1–10):\n"
-            "  +2: Title is CEO or CFO\n"
+            "  +2: Title is CEO or President\n"
             "  +2: Title is CMO or Chief Medical Officer\n"
             "  +2: Purchase amount > $500,000\n"
             "  +1: Purchase amount $100,000–$499,999\n"
             "  +2: CLUSTER detected (3+ insiders in 30 days)\n"
-            "  +1: Purchase price within 10% of 52-week low\n"
-            "  +1: Confirmed holding period > 30 days (no offsetting sale)\n"
+            "  +1: Purchase price within 5% of 52-week low (week52_low from companies table)\n"
+            "  +1: Confirmed holding period > 30 days (no offsetting sale in next filing)\n"
+            "  -2: Insider simultaneously exercised and sold options same day (Code M + Code S same date)\n"
             "  -3: 10b5-1 plan attached to any transaction in window\n"
             "  Final: cap conviction at 1 (min) and 10 (max).\n\n"
             "STEP 6 — Signal Classification:\n"
-            "  CLUSTER_BUY: 3+ unique insiders Code P, conviction ≥ 7\n"
-            "  STRONG_BUY: single insider Code P, amount > $500k, conviction ≥ 6\n"
-            "  SINGLE_BUY: single insider Code P, conviction 4–5\n"
+            "  CLUSTER_BUY: 3+ unique insiders Code P within 30 days (conviction range 8–10)\n"
+            "  STRONG_BUY: CEO + 1 other Code P within 14 days (conviction = 8)\n"
+            "  SINGLE_BUY: 1–2 Code P buys within 30 days (conviction 5–7)\n"
             "  NEUTRAL: no Code P in last 90 days\n"
             "  SINGLE_DISCRETIONARY_SELL: Code S, non-10b5-1, single insider\n"
             "  CLUSTER_DISCRETIONARY_SELL: 3+ Code S, non-10b5-1, within 30 days\n\n"
             "STEP 7 — Write to agent_insider_findings via DatabaseWriteTool:\n"
-            f"  ticker={ticker}, signal, conviction_score, cluster_detected (bool),\n"
-            "  largest_purchase_usd, insider_count_90d, analysis_date.\n\n"
+            f"  ticker={ticker}, scan_date=today, signal, conviction_score,\n"
+            "  total_open_market_buys, total_discretionary_sells, analysis_summary.\n\n"
             "Return JSON: {\"ticker\": str, \"signal\": str, \"conviction_score\": int, "
-            "\"cluster_detected\": bool, \"insider_count_90d\": int, "
+            "\"total_open_market_buys\": int, \"total_discretionary_sells\": int, "
             "\"largest_purchase_usd\": float, \"largest_buyer_title\": str}"
         ),
         expected_output=(
             "JSON with ticker, signal (CLUSTER_BUY|STRONG_BUY|SINGLE_BUY|NEUTRAL|"
             "SINGLE_DISCRETIONARY_SELL|CLUSTER_DISCRETIONARY_SELL), conviction_score (1–10), "
-            "cluster_detected (bool), insider_count_90d, largest_purchase_usd, "
-            "and largest_buyer_title."
+            "total_open_market_buys, total_discretionary_sells, "
+            "largest_purchase_usd (largest single Code P amount), and largest_buyer_title."
         ),
         agent=agent,
     )

@@ -1,4 +1,4 @@
-# Biotech-Analyzer v3.5
+# Biotech-Analyzer v3.6
 
 An AI-driven investment intelligence platform for the biotechnology sector. Ten specialized AI agents orchestrated by CrewAI analyze clinical trial data, SEC filings, insider activity, FDA catalysts, and options markets — all running 100% locally on your hardware.
 
@@ -319,7 +319,7 @@ sudo docker exec -e PYTHONPATH=/app biotech-app python3 scripts/onboard_company.
 The 7 steps:
 1. Validates the ticker via yfinance (exchange, sector, market cap, cash)
 2. Fetches the latest 10-K from SEC EDGAR
-3. Embeds the 10-K into ChromaDB (512-token chunks; GPU required)
+3. Embeds the strictly pruned 10-K sections (Items 1, 1A, 7) into ChromaDB (512-token chunks; GPU required)
 4. Extracts drug names, NCT IDs, and financial data via Ollama llama3.1:8b
 5. Upserts results into SQLite (companies, interventions, sec_filings)
 6. Links clinical trials via 4-pass CT.gov lookup (NCT IDs → drug names → sponsor → entity aliases)

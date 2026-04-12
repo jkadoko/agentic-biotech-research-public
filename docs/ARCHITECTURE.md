@@ -1,8 +1,8 @@
 # Biotech-Analyzer v3.5 - System Architecture
 
-**Version:** 3.5r
-**Last Updated:** 2026-03-15
-**Aligned with:** PRD v3.5y, DATAFLOW.md v3.5p, CREWAI_TOOLS.md v2.0
+**Version:** 3.5s
+**Last Updated:** 2026-04-12
+**Aligned with:** PRD v3.5z, DATAFLOW.md v3.5z, CREWAI_TOOLS.md v2.2
 
 ## Overview
 Biotech-Analyzer v3.5 is a streamlined, AI-driven investment platform designed for maximum leverage and minimal complexity. It transitions from a complex, script-heavy desktop application to a containerized, web-based system powered by **CrewAI**, **ChromaDB (local vector store)**, and **Streamlit**.

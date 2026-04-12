@@ -1,8 +1,8 @@
 # Biotech-Analyzer v3.5 — Dataflow Document
 
-**Version:** 3.5p
-**Last Updated:** 2026-03-15
-**Aligned with:** PRD v3.5p, ARCHITECTURE.md v3.5p, SCHEMA.md v3.5p
+**Version:** 3.5z
+**Last Updated:** 2026-04-12
+**Aligned with:** PRD v3.5z, ARCHITECTURE.md v3.5r, SCHEMA.md v3.5s
 
 ## Overview
 
@@ -167,14 +167,14 @@ All agent outputs are also exported to `output/{agent_name}/{ticker}_{YYYYMMDD}.
 A feedback loop feeds agent outputs back into ChromaDB to create longitudinal memory.
 
 ```
-[Weekly cron: scripts/sync_local_rag.py]
+[Weekly cron: scripts/sync_local_rag.py — Sunday 02:00 UTC]
     │
     ▼
 Query SQLite: new agent_investment_memos + agent_scientific_audits
              WHERE uploaded_to_rag = 0
     │
     ▼
-Embed as markdown → ChromaDB (partitioned by therapeutic area)
+Embed as markdown → ChromaDB `agent_memos` collection
     │
     ▼
 Set uploaded_to_rag = 1 on synced records
@@ -184,17 +184,40 @@ Result: Strategist can now query historical context:
         "What did I recommend for BNTX last quarter, and was I right?"
 ```
 
+**Note:** Non-10K SEC filings (8-Ks, 10-Qs) are embedded via `fetch_sec_filings.py` into the `sec_filings` ChromaDB collection on the nightly 07:00 run — not via `sync_local_rag.py`. The weekly sync handles agent output tables only.
+
 ---
 
-## Phase 4: User Interface (Streamlit — Read-Only)
+## Phase 4: User Interface (Streamlit — On-Demand + Read)
 
-Streamlit reads pre-computed results from SQLite only. No agent logic runs in the UI layer.
+Streamlit is primarily a read-only dashboard, but includes on-demand pipeline triggers for operational use.
 
 - **Portfolio Dashboard:** Performance, Sharpe Ratio, Drawdown, active CSP positions
 - **Holdings Table:** Active signals per ticker (BAS score, recommendation, upcoming catalysts)
 - **Agent Reports:** Click ticker → latest Strategist investment memo
 - **News Feed:** Latest `news_articles` with category filter
 - **Direct RAG Query:** Free-text search directly against ChromaDB (bypasses agents)
+- **Quick Onboard:** User-triggered `onboard_company.py` via Streamlit UI for manual ticker addition — this DOES run pipeline logic (LLM extraction, ChromaDB embedding). The "no agent logic in UI" rule applies to the analysis/strategy crews, not the onboarding pipeline.
+
+---
+
+## Phase 5: Maintenance & Pruning (Weekly)
+
+Scheduled maintenance tasks prevent unbounded data growth.
+
+```
+[Sunday 02:00 UTC — runs alongside sync_local_rag.py]
+    │
+    ├── DELETE FROM news_articles WHERE published_at < date('now', '-90 days')
+    │   (REQ-091: 90-day news retention window)
+    │
+    └── DELETE FROM companies.watchlist_flags WHERE MA_RUMOR_FLAG.detected_at > 30 days
+        AND no confirming 8-K found (REQ-092: stale M&A flag cleanup)
+```
+
+Nightly passive pruning (via ingestion):
+- Inactive trials: `fetch_aact_csvs.py` marks trials `TERMINATED` or `WITHDRAWN` in `studies.status` automatically during upsert — no explicit delete needed
+- Historical prices: retained indefinitely (small row footprint, high analytical value)
 
 ---
 

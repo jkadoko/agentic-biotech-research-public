@@ -23,7 +23,7 @@ import os
 from crewai import Agent, LLM, Task
 
 from src.tools.db_tool import DatabaseQueryTool, DatabaseWriteTool
-from src.tools.search_tool import DuckDuckGoSearchTool
+from src.tools.local_rag_tool import LocalRAGTool
 from src.tools.sec_edgar_tool import SECEdgarFetcherTool
 
 _GPU0 = os.environ.get("OLLAMA_HOST_GPU0", "http://ollama-gpu0:11434")
@@ -31,7 +31,8 @@ _GPU0 = os.environ.get("OLLAMA_HOST_GPU0", "http://ollama-gpu0:11434")
 _BIOTECH_SPECIALISTS = (
     "Baker Bros (+3), RA Capital (+3), Foresite (+3), Perceptive Advisors (+3), "
     "Orbis Investment (+3), Venrock (+3), RTW Investments (+3), EcoR1 (+3), "
-    "Boxer Capital (+3), Deep Track Capital (+3), OrbiMed (+2)"
+    "Boxer Capital (+3), Deep Track Capital (+3), Deerfield Management (+3), "
+    "Sofinnova Partners (+3), OrbiMed (+2)"
 )
 _GENERALIST_FUNDS = (
     "BlackRock (-2), Vanguard (-2), State Street (-2), "
@@ -62,7 +63,7 @@ def make_smart_money_agent() -> Agent:
         tools=[
             DatabaseQueryTool(),
             DatabaseWriteTool(),
-            DuckDuckGoSearchTool(),
+            LocalRAGTool(),
             SECEdgarFetcherTool(),
         ],
         llm=llm,
@@ -91,11 +92,12 @@ def make_smart_money_task(agent: Agent, ticker: str) -> Task:
             "  - GENERALIST: BlackRock, Vanguard, State Street → -2 modifier\n"
             "  - MIXED: Fidelity, T. Rowe Price → 0 modifier\n"
             "  - THEMATIC: ARK → -1 modifier\n"
-            "  - UNKNOWN: research via DuckDuckGoSearchTool: '{fund_name} biotech investment focus'\n\n"
+            "  - UNKNOWN: research via LocalRAGTool (agent_memos collection): '{fund_name} biotech strategy'\n\n"
             "STEP 3 — Position Change Detection:\n"
             "  Compare current filing to previous (if any) via DatabaseQueryTool:\n"
-            "    SELECT shares_held, percent_outstanding FROM agent_smart_money_findings "
-            "    WHERE ticker = '{ticker}' AND institution = '{institution}'.\n"
+            "    SELECT shares, pct_of_class, filing_date FROM smart_money_positions "
+            "    WHERE ticker = '{ticker}' AND institution_name = '{institution}' "
+            "    ORDER BY filing_date DESC LIMIT 2.\n"
             "  Classify change:\n"
             "    NEW (no prior position): +3\n"
             "    ACCUMULATION (increased ≥ 20%): +2\n"
@@ -108,11 +110,22 @@ def make_smart_money_task(agent: Agent, ticker: str) -> Task:
             "    'shareholder value', 'merger', 'sale of company'.\n"
             "  - Activist 13D with BIOTECH_SPECIALIST = highest conviction signal.\n\n"
             "STEP 5 — Conviction Scoring (1–10):\n"
-            "  Base score by form type:\n"
-            "    13D (activist): 8 | 13G (passive ≥5%): 5 | 13G/A (increase): 6\n"
-            "  Add fund modifier (see Step 2).\n"
-            "  Add position change modifier (see Step 3).\n"
-            "  Final score = base + fund_modifier + change_modifier (cap 1–10).\n\n"
+            "  Base score by form type (per spec Section 7 Step 4):\n"
+            "    SC 13D (activist): 8\n"
+            "    SC 13G by BIOTECH_SPECIALIST fund: 7\n"
+            "    SC 13G by generalist fund: 5\n"
+            "    SC 13G/A (amendment, no material change): 4\n"
+            "  Add fund_classifier_modifier (Step 2: -2 to +3).\n"
+            "  Add position_change_modifier (Step 3: -4 to +3).\n"
+            "  Add position_size_modifier:\n"
+            "    position_as_pct_of_market_cap = (shares × price) / market_cap_usd\n"
+            "    >15%: +2 | 10–15%: +1 | 5–10%: 0 | <5%: -1\n"
+            "    DatabaseQueryTool: SELECT market_cap_usd FROM companies WHERE ticker = '{ticker}'.\n"
+            "  Add 13d_intent_modifier (SC 13D filings only):\n"
+            "    'acquisition', 'merger', 'tender offer' in purpose text: +2\n"
+            "    'undervalued', 'capital allocation': +1\n"
+            "    Standard 'investment purposes' boilerplate: 0\n"
+            "  Final conviction_score = base + sum(modifiers), clamped to 1–10.\n\n"
             "STEP 6 — Aggregate Signal:\n"
             "  SPECIALIST_CLUSTER: 2+ BIOTECH_SPECIALIST funds with NEW/ACCUMULATION\n"
             "  ACTIVIST_PLUS_SPECIALIST: 13D + BIOTECH_SPECIALIST fund both present\n"
@@ -128,24 +141,32 @@ def make_smart_money_task(agent: Agent, ticker: str) -> Task:
             "  - If analyst downgrade within 7 days: conflicting_signal = True, "
             "    reduce conviction_score by 1.\n\n"
             "STEP 8 — Already-Priced-In Check (REQ-024):\n"
-            "  - DatabaseQueryTool: SELECT current_price_usd, price_52wk_low "
+            "  - DatabaseQueryTool: SELECT price_current, week52_low "
             "    FROM companies WHERE ticker = '{ticker}'.\n"
             "  - Calculate price drift since earliest new specialist filing.\n"
             "  - already_priced_in = True if price drift > 20%.\n\n"
-            "STEP 9 — Write to agent_smart_money_findings via DatabaseWriteTool:\n"
-            f"  ticker={ticker}, signal, conviction_score, specialist_count,\n"
-            "  conflicting_signal (bool), already_priced_in (bool), "
-            "  institutional_positions (JSON array of positions).\n\n"
+            "STEP 9 — Write granular positions to smart_money_positions via DatabaseWriteTool:\n"
+            f"  For each institution found: ticker={ticker}, institution_name, filing_date,\n"
+            "  filing_type (SC_13G|SC_13G_A|SC_13D|SC_13D_A), shares, pct_of_class,\n"
+            "  is_specialist (True for Baker Bros/RA Capital/Foresite/Perceptive/Orbis/\n"
+            "  Venrock/RTW/EcoR1/Boxer/Deep Track/OrbiMed, False otherwise).\n"
+            "  PK: (ticker, institution_name, filing_date).\n\n"
+            "STEP 10 — Write summary to agent_smart_money_findings via DatabaseWriteTool:\n"
+            f"  ticker={ticker}, scan_date=today, signal, conviction_score,\n"
+            "  top_institution, top_institution_pct, price_drift_pct,\n"
+            "  conflicting_signal (bool), already_priced_in (bool), analysis_summary,\n"
+            "  uploaded_to_rag=False (will be set True by sync_local_rag.py on Sunday sync).\n\n"
             "Return JSON: {\"ticker\": str, \"signal\": str, \"conviction_score\": int, "
-            "\"specialist_count\": int, \"conflicting_signal\": bool, "
+            "\"top_institution\": str, \"top_institution_pct\": float, "
+            "\"price_drift_pct\": float, \"conflicting_signal\": bool, "
             "\"already_priced_in\": bool, \"top_holders\": [{\"fund\": str, "
             "\"type\": str, \"change\": str, \"pct_outstanding\": float}]}"
         ),
         expected_output=(
             "JSON with ticker, signal (SPECIALIST_CLUSTER|ACTIVIST_PLUS_SPECIALIST|"
             "SPECIALIST_NEW|INDEX_ONLY|REDUCTION|EXIT), conviction_score (1–10), "
-            "specialist_count, conflicting_signal (bool), already_priced_in (bool), "
-            "and top_holders list."
+            "top_institution, top_institution_pct, price_drift_pct, "
+            "conflicting_signal (bool), already_priced_in (bool), and top_holders list."
         ),
         agent=agent,
     )

@@ -9,10 +9,11 @@ Identifies high-value commercial partnerships: CO_DEVELOPMENT, LICENSING,
 CO_PROMOTION, OPTION_TO_ACQUIRE, TECHNOLOGY.
 Excludes: MANUFACTURING, CRO_SERVICE, ACADEMIC.
 
-Quality Score (REQ-025):
-  +2 Tier 1 partner (major pharma >$100B), +1 Tier 2 ($10–100B),
-  +2 if upfront > 10% × market_cap_at_deal,
+Quality Score (REQ-025, strict formula, range 0–5):
+  +2 Tier 1 partner (major pharma >$100B), +1 Tier 2/3 ($10–100B or tech company),
+  +2 if upfront_usd > 10% × market_cap_at_deal_usd,
   -1 if direction = IN (company is licensee, not licensor).
+  PK: (ticker, partner_name, drug_asset) — drug_asset required on every write.
 """
 
 import os
@@ -34,6 +35,10 @@ _TIER1_PARTNERS = (
 _TIER2_PARTNERS = (
     "Astellas, Daiichi Sankyo, UCB, Ipsen, Seagen, Alexion, Shire, Bausch, "
     "Jazz, Halozyme, Incyte"
+)
+_TIER3_PARTNERS = (
+    "Google, Alphabet, Microsoft, NVIDIA, Amazon, Meta, IBM, Apple "
+    "(technology/AI platform partners)"
 )
 
 
@@ -72,8 +77,9 @@ def make_partnership_task(agent: Agent, ticker: str) -> Task:
     return Task(
         description=(
             f"PARTNERSHIP INTELLIGENCE — Find and score all material partnerships for {ticker}.\n\n"
-            f"TIER 1 partners (major pharma, +2 quality score): {_TIER1_PARTNERS}\n"
-            f"TIER 2 partners ($10–100B, +1 quality score): {_TIER2_PARTNERS}\n\n"
+            f"TIER 1 partners (major pharma >$100B, +2 quality score): {_TIER1_PARTNERS}\n"
+            f"TIER 2 partners ($10–100B pharma, +1 quality score): {_TIER2_PARTNERS}\n"
+            f"TIER 3 partners (technology/AI companies, +1 quality score): {_TIER3_PARTNERS}\n\n"
             "TASK A — ClinicalTrials.gov Structural Query:\n"
             "  - ClinicalTrialsTool: search by sponsor={ticker} to find collaborators.\n"
             "  - For each trial, extract collaborator names from results.\n"
@@ -97,32 +103,36 @@ def make_partnership_task(agent: Agent, ticker: str) -> Task:
             "    AND published_at > datetime('now', '-180 days').\n"
             "  - DuckDuckGoSearchTool: '{ticker} partnership deal collaboration licensing 2024 2025'\n"
             "  - Cross-reference with CT.gov and SEC findings.\n\n"
-            "TASK D — Quality Scoring (REQ-025):\n"
+            "TASK D — Quality Scoring (REQ-025 strict formula):\n"
+            "  - DatabaseQueryTool: SELECT market_cap_usd FROM companies "
+            "    WHERE ticker = '{ticker}' (for upfront ratio calculation).\n"
             "  For each partnership, compute quality_score:\n"
-            "  +2: Tier 1 partner (major pharma)\n"
-            "  +1: Tier 2 partner\n"
-            "  +0: Tier 3 or unknown\n"
-            "  +2: upfront_payment > 10% × market_cap_at_deal_usd\n"
-            "  +1: upfront_payment 5–10% × market_cap_at_deal_usd\n"
+            "  +2: Tier 1 partner (major pharma >$100B market cap)\n"
+            "  +1: Tier 2 OR Tier 3 partner (mid-pharma OR technology company)\n"
+            "  +2: upfront_usd > 10% × market_cap_at_deal_usd "
+            "(snapshot market cap at deal_date, use current market_cap_usd if deal_date is today)\n"
             "  -1: direction = IN (company is licensee, not licensor — less validating)\n"
-            "  +1: milestone-to-upfront ratio > 5× (large back-end = partner confidence)\n"
-            "  quality_score range: 0–6.\n\n"
+            "  quality_score range: 0–5 (REQ-025 canonical formula — no other modifiers).\n\n"
             "TASK E — Direction Classification:\n"
             "  OUT: {ticker} licenses IP out to partner (licensor role, more validating)\n"
             "  IN: {ticker} licenses IP from partner (licensee role)\n"
             "  BOTH: mutual cross-licensing\n\n"
             "TASK F — Write to partnerships table via DatabaseWriteTool:\n"
-            "  For each partnership: ticker, partner_name, partner_tier (1/2/3),\n"
-            "  partnership_type, direction, upfront_payment_usd, total_milestone_usd,\n"
-            "  quality_score, status (ACTIVE|EXPIRED|RUMORED), confidence (HIGH|MEDIUM|LOW).\n\n"
+            "  PK is (ticker, partner_name, drug_asset) — drug_asset is REQUIRED.\n"
+            "  For each partnership: ticker, partner_name, drug_asset (drug/platform name),\n"
+            "  partnership_type, direction, deal_date, upfront_usd, milestone_usd,\n"
+            "  market_cap_at_deal_usd, quality_score, scan_date=today,\n"
+            "  status (ACTIVE|TERMINATED|PENDING), confidence (HIGH|MEDIUM|LOW),\n"
+            "  source_type (SEC_10K|CLINICALTRIALS|SEC_10K_AND_CLINICALTRIALS|RSS_NEWS).\n\n"
             "Return JSON: {\"ticker\": str, \"partnerships_found\": int, "
-            "\"partnerships\": [{\"partner\": str, \"type\": str, \"tier\": int, "
+            "\"partnerships\": [{\"partner_name\": str, \"drug_asset\": str, "
+            "\"partnership_type\": str, "
             "\"quality_score\": int, \"direction\": str, \"status\": str}]}"
         ),
         expected_output=(
             "JSON with ticker, count of partnerships found, and list of partnerships "
-            "each with partner, partnership_type, partner_tier (1/2/3), quality_score (0–6), "
-            "direction (IN|OUT|BOTH), and status (ACTIVE|EXPIRED|RUMORED)."
+            "each with partner_name, drug_asset, partnership_type, quality_score (0–5), "
+            "direction (IN|OUT|BOTH), and status (ACTIVE|TERMINATED|PENDING)."
         ),
         agent=agent,
     )

@@ -72,9 +72,23 @@ class DatabaseQueryTool(BaseTool):
 # Primary key map — must match SCHEMA.md exactly.
 # Composite PKs expressed as a list. All values must be present in the data dict.
 PRIMARY_KEY_MAP: dict[str, list[str]] = {
+    # Core registry
+    "companies":                  ["ticker"],
     "entity_aliases":             ["alias"],
     "disease_context":            ["condition_normalized"],
+    # AACT-sourced trial tables
+    "studies":                    ["nct_id"],
     "trial_pipeline":             ["ticker", "nct_id"],
+    "conditions":                 ["nct_id", "condition_name"],
+    "interventions":              ["nct_id", "drug_name"],
+    "collaborators":              ["nct_id", "collaborator_name"],
+    "design_outcomes":            ["nct_id", "outcome_type", "measure"],
+    # Supporting tables
+    "orphan":                     ["ticker", "drug_name"],
+    "sec_filings":                ["ticker", "filing_date", "filing_type"],
+    "company_onboarding_log":     ["ticker", "onboarding_date"],
+    "news_articles":              ["url"],
+    # Agent output tables
     "agent_profiler_findings":    ["ticker", "profile_date"],
     "agent_scientific_audits":    ["ticker", "nct_id", "audit_date"],
     "agent_insider_findings":     ["ticker", "scan_date"],
@@ -82,10 +96,8 @@ PRIMARY_KEY_MAP: dict[str, list[str]] = {
     "agent_volatility_findings":  ["ticker", "scan_date"],
     "partnerships":               ["ticker", "partner_name", "drug_asset"],
     "agent_smart_money_findings": ["ticker", "scan_date"],
-    "agent_investment_memos":     ["ticker", "memo_date"],
-    "companies":                  ["ticker"],
     "smart_money_positions":      ["ticker", "institution_name", "filing_date"],
-    "news_articles":              ["id"],
+    "agent_investment_memos":     ["ticker", "memo_date"],
 }
 
 

@@ -1,8 +1,8 @@
 # Biotech Investment Analyzer — Database Schema & Variable Reference
 
-**Version:** 3.5s
-**Last Updated:** 2026-03-15
-**Aligned with:** PRD v3.5y, CREWAI_TOOLS.md v2.0
+**Version:** 3.5t
+**Last Updated:** 2026-04-11
+**Aligned with:** PRD v3.5z, CREWAI_TOOLS.md v2.1
 **Supersedes:** SCHEMA.md v16.5 (legacy 23-agent schema)
 
 All tables reside in a single SQLite WAL-mode database: `biotech_tracker.db`.
@@ -39,15 +39,15 @@ The canonical SQL definitions live in `src/db/models.py` (SQLModel).
 | `annual_revenue_usd` | REAL | yfinance / SEC 10-K | Trailing 12m revenue; REQ-026 THERAPEUTIC vs PLATFORM classification depends on `> 0` |
 | `cash_per_share` | REAL | Derived nightly | `total_cash_usd / shares_outstanding`; input to REQ-066 floor price |
 | `book_value_per_share` | REAL | yfinance Fundamentals | Input to REQ-066 floor price |
-| `52wk_high` | REAL | E*TRADE / yfinance | 52-week high price |
-| `52wk_low` | REAL | E*TRADE / yfinance | 52-week low price; input to REQ-066 floor price (`52wk_low × 0.90`) |
-| `floor_price` | REAL | Derived nightly | **REQ-066:** `MAX(cash_per_share, book_value_per_share, 52wk_low × 0.90)` — canonical floor for Volatility agent |
+| `week52_high` | REAL | E*TRADE / yfinance | 52-week high price |
+| `week52_low` | REAL | E*TRADE / yfinance | 52-week low price; input to REQ-066 floor price (`week52_low × 0.90`) |
+| `floor_price` | REAL | Derived nightly | **REQ-066:** `MAX(cash_per_share, book_value_per_share, week52_low × 0.90)` — canonical floor for Volatility agent |
 | `runway_months` | INTEGER | Derived | `total_cash_usd / burn_rate_monthly_usd`; updated nightly |
 | `burn_rate_monthly_usd` | REAL | SEC 10-K / Profiler | Monthly cash burn extracted during onboarding Step 4 |
 | `listing_date` | DATE | yfinance | IPO or listing date |
 | `added_by` | TEXT | System | `MANUAL` (user entry) or `SCOUT_AUTO` (Scout Task A discovery) |
 | `is_active` | BOOLEAN DEFAULT 1 | Admin | **REQ-071:** 0 for delisted/inactive tickers; all ingestion scripts filter `WHERE is_active = 1` |
-| `last_10k_parsed` | DATE | Onboarding pipeline | Date of most recent 10-K extraction run |
+| `last_filing_parsed` | DATE | Onboarding pipeline | Date of most recent 10-K or 20-F extraction run |
 | `onboarding_status` | TEXT | Onboarding pipeline | `PENDING` / `COMPLETE` / `FAILED` / `STALE` (triggered when new 10-K detected via RSS) |
 | `watchlist_flags` | JSON | Scout Task E / System | Array of active alert objects (e.g., `MA_RUMOR_FLAG`). Each entry: `{flag, source, headline, source_url, detected_at}`. Scout Task E writes here; entries auto-expire after 30 days if no confirming 8-K found. Displayed in Streamlit as amber alert badges. |
 | `last_updated` | TIMESTAMP | System | Timestamp of most recent row update |
