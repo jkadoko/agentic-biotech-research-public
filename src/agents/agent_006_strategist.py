@@ -3,7 +3,7 @@ Agent 006 — Strategist: Chief Investment Officer
 
 Spec: docs/AGENT_006_STRATEGIST.md v3.3
 Crew: Strategy (Crew 3)
-Model: deepseek-r1:7b-q4_K_M (Ollama GPU1) — reasoning model required
+Model: deepseek-r1:7b (Ollama GPU1) — reasoning model required
 
 Synthesizes all 8 upstream agent outputs into an investment memo with
 Biotech Alpha Score (BAS, 0–100) and Kelly Criterion position sizing.
@@ -33,7 +33,7 @@ _GPU1 = os.environ.get("OLLAMA_HOST_GPU1", "http://ollama-gpu1:11435")
 
 
 def make_strategist_agent() -> Agent:
-    llm = LLM(model="ollama/deepseek-r1:7b-q4_K_M", base_url=_GPU1)
+    llm = LLM(model="ollama/deepseek-r1:7b", base_url=_GPU1)
     return Agent(
         role="Chief Investment Officer",
         goal=(

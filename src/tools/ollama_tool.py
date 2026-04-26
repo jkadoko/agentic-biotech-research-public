@@ -6,7 +6,7 @@ Used by: Agent 006 (Strategist — deepseek-r1 reasoning), Agent 010 (Partnershi
 
 VRAM budget (Tesla P4, 8GB each):
   GPU0: llama3.1:8b (~5.5GB) — primary model for most agents
-  GPU1: deepseek-r1:7b-q4_K_M (~4.5GB) + llama3.2:3b (~2.0GB) = 6.5GB — fits on single P4
+  GPU1: deepseek-r1:7b (~4.5GB) + llama3.2:3b (~2.0GB) = 6.5GB — fits on single P4
 
 All data processed stays on-premises (no cloud calls).
 """
@@ -23,7 +23,7 @@ OLLAMA_HOST_GPU1 = os.environ.get("OLLAMA_HOST_GPU1", "http://ollama-gpu1:11435"
 
 # Route reasoning models to GPU1, primary models to GPU0
 _MODEL_HOST_MAP = {
-    "deepseek-r1:7b-q4_K_M": OLLAMA_HOST_GPU1,
+    "deepseek-r1:7b": OLLAMA_HOST_GPU1,
     "llama3.2:3b": OLLAMA_HOST_GPU1,
     "llama3.1:8b": OLLAMA_HOST_GPU0,
     "mxbai-embed-large:latest": OLLAMA_HOST_GPU0,
@@ -33,10 +33,10 @@ _MODEL_HOST_MAP = {
 class OllamaInferenceInput(BaseModel):
     prompt: str = Field(description="Full prompt to send to the local LLM")
     model: str = Field(
-        default="deepseek-r1:7b-q4_K_M",
+        default="deepseek-r1:7b",
         description=(
             "Ollama model name. Options: "
-            "deepseek-r1:7b-q4_K_M (chain-of-thought reasoning — Strategist), "
+            "deepseek-r1:7b (chain-of-thought reasoning — Strategist), "
             "llama3.2:3b (fast structured extraction — Partnership/Volatility), "
             "llama3.1:8b (primary general model)"
         ),
@@ -51,7 +51,7 @@ class OllamaLLMTool(BaseTool):
     name: str = "ollama_inference"
     description: str = (
         "Run inference on a local Ollama LLM. "
-        "Use deepseek-r1:7b-q4_K_M for chain-of-thought reasoning "
+        "Use deepseek-r1:7b for chain-of-thought reasoning "
         "(investment synthesis, BAS scoring, strategy evaluation). "
         "Use llama3.2:3b for fast structured extraction "
         "(partnership entity extraction from SEC text, JSON parsing). "
@@ -63,7 +63,7 @@ class OllamaLLMTool(BaseTool):
     def _run(
         self,
         prompt: str,
-        model: str = "deepseek-r1:7b-q4_K_M",
+        model: str = "deepseek-r1:7b",
         temperature: float = 0.1,
     ) -> str:
         try:

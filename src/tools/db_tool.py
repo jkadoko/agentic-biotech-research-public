@@ -85,6 +85,8 @@ PRIMARY_KEY_MAP: dict[str, list[str]] = {
     "design_outcomes":            ["nct_id", "outcome_type", "measure"],
     # Supporting tables
     "orphan":                     ["ticker", "drug_name"],
+    "historical_prices":          ["ticker", "date"],      # SQL column is "date" (Python field: price_date)
+    "options_chains":             ["ticker", "expiration", "strike", "option_type"],
     "sec_filings":                ["ticker", "filing_date", "filing_type"],
     "company_onboarding_log":     ["ticker", "onboarding_date"],
     "news_articles":              ["url"],

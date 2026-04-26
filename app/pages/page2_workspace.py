@@ -119,7 +119,12 @@ def _render_context_header(ticker: str):
     # Action bar
     a1, a2, a3 = st.columns([1, 1, 6])
     with a1:
-        if st.button("Force Refresh", key="_p2_refresh", help="Re-run the onboarding pipeline and refresh data"):
+        if st.button(
+            "Force Refresh",
+            key="_p2_refresh",
+            help="Re-run the onboarding pipeline and refresh data",
+            use_container_width=True,
+        ):
             with st.spinner(f"Re-onboarding {ticker}..."):
                 try:
                     from scripts.onboard_company import onboard
@@ -130,11 +135,18 @@ def _render_context_header(ticker: str):
                     st.rerun()
                 except Exception as exc:
                     import logging
+
                     logging.exception("Force refresh failed")
-                    st.toast("Refresh failed. Check connection and try again.", icon="❌")
+                    st.toast(
+                        "Refresh failed. Check connection and try again.", icon="❌"
+                    )
     with a2:
         st.button(
-            "Export PDF", key="_p2_pdf", disabled=True, help="PDF export — coming soon"
+            "Export PDF",
+            key="_p2_pdf",
+            disabled=True,
+            help="PDF export — coming soon",
+            use_container_width=True,
         )
 
 

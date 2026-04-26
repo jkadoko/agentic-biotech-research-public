@@ -3,7 +3,7 @@ Crew 2 — Analysis Crew
 
 Agents: Profiler (003), Peer Reviewer (004), Insider (005),
         Partnership (010), Smart Money (011)
-Process: All 5 run sequentially (each has independent DB outputs;
+Process: All 5 run in parallel (each has independent DB outputs;
          Strategist in Crew 3 reads all of their outputs)
 
 Entry point: run_analysis_crew(ticker)

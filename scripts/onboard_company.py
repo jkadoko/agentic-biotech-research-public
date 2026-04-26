@@ -144,6 +144,35 @@ def step1_validate_ticker(ticker: str) -> dict | None:
 
 
 def _resolve_cik(ticker: str) -> str | None:
+    """Resolve ticker → SEC CIK number.
+
+    Strategy:
+      1. Lookup in the static company_tickers.json (fast, covers ~13k tickers).
+      2. Fallback: query the SEC browse-edgar HTML page and extract the CIK
+         from the response (handles recently-listed or renamed companies).
+      3. If the ticker contains a suffix (e.g. AIM^F13), retry with the base
+         symbol stripped of everything after ^ or =.
+    """
+    # Normalise: strip whitespace, uppercase
+    clean = ticker.strip().upper()
+
+    # Try the original ticker first, then the base symbol if it has a suffix
+    candidates = [clean]
+    base = re.split(r'[\^=]', clean)[0]
+    if base != clean:
+        candidates.append(base)
+
+    for candidate in candidates:
+        cik = _resolve_cik_single(candidate)
+        if cik:
+            return cik
+
+    return None
+
+
+def _resolve_cik_single(ticker: str) -> str | None:
+    """Try static JSON first, then browse-edgar fallback."""
+    # --- Pass 1: static company_tickers.json ---
     try:
         resp = requests.get(
             "https://www.sec.gov/files/company_tickers.json",
@@ -154,7 +183,26 @@ def _resolve_cik(ticker: str) -> str | None:
             if entry.get("ticker", "").upper() == ticker.upper():
                 return str(entry["cik_str"])
     except Exception as exc:
-        log.warning("CIK resolution failed for %s: %s", ticker, exc)
+        log.warning("CIK resolution (JSON) failed for %s: %s", ticker, exc)
+
+    # --- Pass 2: browse-edgar HTML fallback ---
+    try:
+        browse_url = (
+            f"https://www.sec.gov/cgi-bin/browse-edgar"
+            f"?CIK={ticker}&action=getcompany"
+        )
+        resp = requests.get(browse_url, headers=_HEADERS, timeout=20, allow_redirects=True)
+        resp.raise_for_status()
+        # The page includes CIK in several places; grab it from the first
+        # occurrence of cik=NNNNNN in an href.
+        cik_match = re.search(r'CIK=(\d{5,10})', resp.text)
+        if cik_match:
+            cik = cik_match.group(1)
+            log.info("CIK resolved via browse-edgar fallback: %s → %s", ticker, cik)
+            return cik
+    except Exception as exc:
+        log.warning("CIK resolution (browse-edgar) failed for %s: %s", ticker, exc)
+
     return None
 
 
@@ -227,27 +275,52 @@ def step2_fetch_10k(ticker: str, cik: str | None = None) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+def _ollama_embed_batch(texts: list[str], ollama_host: str,
+                        model: str = "mxbai-embed-large:latest",
+                        timeout: int = 120) -> list[list[float]] | None:
+    """Call Ollama /api/embed directly with a generous timeout.
+
+    The ChromaDB OllamaEmbeddingFunction uses httpx with a very short default
+    timeout (~5s), which is insufficient when multiple workers share a GPU.
+    By calling the API ourselves we control the timeout (default 120s).
+    """
+    try:
+        resp = requests.post(
+            f"{ollama_host}/api/embed",
+            json={"model": model, "input": texts},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("embeddings")
+    except requests.exceptions.Timeout:
+        log.warning("Ollama embed timeout (%ds) for %d texts on %s",
+                    timeout, len(texts), ollama_host)
+        return None
+    except Exception as exc:
+        log.warning("Ollama embed error on %s: %s", ollama_host, exc)
+        return None
+
+
 def step3_embed_10k(ticker: str, text: str, edgar_url: str, ollama_host: str | None = None) -> str | None:
     """
     Embed 10-K text into ChromaDB sec_filings collection.
-    Uses 512-token overlapping chunks with mxbai-embed-large:latest via Ollama.
+
+    Pre-computes embeddings via Ollama /api/embed (120s timeout) then upserts
+    the vectors directly into ChromaDB.  This bypasses the ChromaDB
+    OllamaEmbeddingFunction whose short httpx timeout causes failures when
+    multiple workers share a GPU.
+
+    Uses 75-word overlapping chunks with mxbai-embed-large:latest via Ollama.
     Returns ChromaDB source_id or None on failure.
     """
     if ollama_host is None:
         ollama_host = _OLLAMA_HOSTS[0]
     try:
         import chromadb
-        from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
 
         client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
-        embed_fn = OllamaEmbeddingFunction(
-            model_name="mxbai-embed-large:latest",
-            url=ollama_host,
-        )
-        collection = client.get_or_create_collection(
-            name="sec_filings",
-            embedding_function=embed_fn,
-        )
+        # No embedding_function — we pre-compute embeddings ourselves.
+        collection = client.get_or_create_collection(name="sec_filings")
 
         # 75-word chunks with 15-word overlap, strictly truncated to < 1600 chars (ensures < 512 tokens)
         words = text.split()
@@ -267,7 +340,7 @@ def step3_embed_10k(ticker: str, text: str, edgar_url: str, ollama_host: str | N
             return None
 
         source_id = f"{ticker}_{date.today().isoformat()}_10K"
-        log.info("Step 3: embedding %d chunks (max chunk length: %d chars)", 
+        log.info("Step 3: embedding %d chunks (max chunk length: %d chars)",
                  len(chunks), max(len(c) for c in chunks))
         ids = [f"{source_id}_chunk_{j}" for j in range(len(chunks))]
         metadatas = [
@@ -275,13 +348,50 @@ def step3_embed_10k(ticker: str, text: str, edgar_url: str, ollama_host: str | N
             for j in range(len(chunks))
         ]
 
-        # Upsert in batches of 100
-        batch_size = 100
-        for start in range(0, len(chunks), batch_size):
+        # Pre-compute embeddings in batches of 10, then upsert to ChromaDB.
+        # Embedding timeout is 120s per batch (vs OllamaEmbeddingFunction's ~5s).
+        embed_batch_size = 10
+        max_retries = 4
+        all_embeddings: list[list[float]] = []
+
+        for start in range(0, len(chunks), embed_batch_size):
+            end = start + embed_batch_size
+            batch_texts = chunks[start:end]
+            batch_num = start // embed_batch_size + 1
+            total_batches = (len(chunks) + embed_batch_size - 1) // embed_batch_size
+
+            embeddings = None
+            for attempt in range(max_retries):
+                embeddings = _ollama_embed_batch(batch_texts, ollama_host)
+                if embeddings and len(embeddings) == len(batch_texts):
+                    break
+                wait = (attempt + 1) * 5  # 5s, 10s, 15s, 20s
+                log.warning(
+                    "Step 3: Embed failed for %s batch %d/%d, retrying in %ds...",
+                    ticker, batch_num, total_batches, wait,
+                )
+                time.sleep(wait)
+
+            if not embeddings or len(embeddings) != len(batch_texts):
+                log.warning("Step 3: giving up on embedding batch %d/%d for %s",
+                            batch_num, total_batches, ticker)
+                return None
+
+            all_embeddings.extend(embeddings)
+
+            if batch_num % 20 == 0 or batch_num == total_batches:
+                log.info("Step 3: embedded %d/%d batches for %s",
+                         batch_num, total_batches, ticker)
+
+        # Upsert pre-computed embeddings into ChromaDB (no Ollama call needed).
+        upsert_batch_size = 50
+        for start in range(0, len(chunks), upsert_batch_size):
+            end = start + upsert_batch_size
             collection.upsert(
-                ids=ids[start:start + batch_size],
-                documents=chunks[start:start + batch_size],
-                metadatas=metadatas[start:start + batch_size],
+                ids=ids[start:end],
+                documents=chunks[start:end],
+                embeddings=all_embeddings[start:end],
+                metadatas=metadatas[start:end],
             )
 
         log.info("Step 3 OK: embedded %d chunks for %s into ChromaDB", len(chunks), ticker)
@@ -721,6 +831,13 @@ def onboard(ticker: str, worker_id: int = 0) -> str:
         worker_id: Worker index for GPU routing (0=GPU0, 1=GPU1, 2+=shares GPU0)
     """
     ticker = ticker.upper().strip()
+
+    # Stagger worker startup to avoid thundering herd on GPUs
+    if worker_id > 0:
+        delay = worker_id * 5.0
+        log.info("Staggering worker %d startup: sleeping %.1fs...", worker_id, delay)
+        time.sleep(delay)
+
     # Resolve Ollama host for this worker's GPU
     gpu_idx = worker_id if worker_id < len(_OLLAMA_HOSTS) else 0
     ollama_host = _OLLAMA_HOSTS[gpu_idx]

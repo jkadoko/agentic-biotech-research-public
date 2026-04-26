@@ -296,13 +296,19 @@ def _render_omni_search():
                 help=(
                     "Select a ticker to open" if not choice else "Open selected ticker"
                 ),
+                use_container_width=True,
             ):
                 st.session_state.selected_ticker = choice
                 st.session_state.active_page = 2
                 st.session_state.omni_search_open = False
                 st.rerun()
 
-        if st.button("Cancel", key="_omni_cancel"):
+        if st.button(
+            "Cancel",
+            key="_omni_cancel",
+            help="Close omni-search modal",
+            use_container_width=True,
+        ):
             st.session_state.omni_search_open = False
             st.rerun()
 
@@ -337,6 +343,7 @@ def _render_onboard_modal():
                         if not new_ticker
                         else "Onboard this ticker"
                     ),
+                    use_container_width=True,
                 )
                 and new_ticker
             ):
@@ -350,12 +357,21 @@ def _render_onboard_modal():
                         st.session_state.active_page = 2
                     except Exception as exc:
                         import logging
+
                         logging.exception("Onboarding failed for %s", new_ticker)
-                        st.toast(f"Failed to onboard {new_ticker}. Please verify the ticker symbol and try again.", icon="❌")
+                        st.toast(
+                            f"Failed to onboard {new_ticker}. Please verify the ticker symbol and try again.",
+                            icon="❌",
+                        )
                 st.session_state.onboard_modal_open = False
                 st.rerun()
         with col2:
-            if st.button("Cancel", key="_onboard_cancel"):
+            if st.button(
+                "Cancel",
+                key="_onboard_cancel",
+                help="Close onboard modal",
+                use_container_width=True,
+            ):
                 st.session_state.onboard_modal_open = False
                 st.rerun()
 
@@ -386,7 +402,12 @@ def _render_help():
 | `P` | Partnerships (Page 2) |
 | `W` | News (Page 2) |
         """)
-        if st.button("Close", key="_help_close"):
+        if st.button(
+            "Close",
+            key="_help_close",
+            help="Close keyboard shortcuts help",
+            use_container_width=True,
+        ):
             st.session_state.help_open = False
             st.rerun()
 

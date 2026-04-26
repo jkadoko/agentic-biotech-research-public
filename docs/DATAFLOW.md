@@ -2,7 +2,7 @@
 
 **Version:** 3.5z
 **Last Updated:** 2026-04-12
-**Aligned with:** PRD v3.5z, ARCHITECTURE.md v3.5r, SCHEMA.md v3.5s
+**Aligned with:** PRD v3.5z, ARCHITECTURE.md v3.5s, SCHEMA.md v3.5t
 
 ## Overview
 

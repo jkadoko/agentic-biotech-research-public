@@ -80,349 +80,40 @@ The system is designed to be **written and unit-tested on any machine** and **de
 
 ---
 
-## Setup — Step by Step
+## Setup — Quick Start
 
-### Step 1 — Clone and configure environment
+### 1. Clone the environment
 
 ```bash
 git clone https://github.com/your-username/agentic-biotech-research.git
 cd agentic-biotech-research
-cp .env.example .env
 ```
 
-**Ubuntu (standard):**
-```bash
-git clone https://github.com/your-username/agentic-biotech-research.git
-cd agentic-biotech-research
-cp .env.example .env
-nano .env  # Or use your preferred editor
-```
+### 2. Run the Initialization & Onboarding Script
 
-Edit `.env` and fill in your credentials. **Note:** Ensure you are in the project root (where `docker-compose.yml` resides) and not a nested parent directory.
+The repository ships with an initialization script designed to fully bootstrap the database, install Python dependencies via Docker, start Ollama's local GPU resources, download the necessary models, and initialize ChromaDB.
 
-```env
-# Required: SEC EDGAR (free — use your name/email as the User-Agent)
-SEC_USER_AGENT=YourApp your@email.com
-
-# Optional: E*TRADE (needed for live options chains)
-ETRADE_CONSUMER_KEY=your_key
-ETRADE_CONSUMER_SECRET=your_secret
-
-# Auto-set by docker-compose — override only if running outside Docker
-# DB_PATH=biotech_tracker.db
-# OUTPUT_DIR=output
-# CHROMADB_HOST=localhost
-# OLLAMA_HOST_GPU0=http://localhost:11434
-```
-
-The minimum viable configuration requires only `SEC_USER_AGENT`. Web search uses DuckDuckGo and needs no API key. E*TRADE is optional — yfinance provides a free fallback for options data.
-
----
-
-### Step 2 — Start the core services (no GPU required)
+It also automatically handles onboarding pending biotech tickers into the system.
 
 ```bash
-docker compose up -d --build biotech-app chromadb
+./onboard.sh
 ```
 
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker compose up -d --build biotech-app chromadb
-```
+**Note for specific tickers**: If you want to limit the onboarding phase to only specific companies right now, pass their ticker names as arguments (e.g. `./onboard.sh MRNA BIIB`). Otherwise, it runs all pending tickers in the queue by default.
 
-This starts:
-- **biotech-app** — Streamlit dashboard (see Step 9 for Nginx/port 80)
-- **chromadb** — local vector store on http://localhost:8000
+### 3. Start the Full Stack
 
-The scheduler and Ollama GPU services are excluded from this default startup. Use `--build` on first run (or after any code change) to ensure the image reflects local edits.
+Once the models are pulled and the initial onboarding is complete, use the **startup script** to launch the entire ecosystem (including reverse proxy, UI, and the scheduler to handle background data updates). 
 
-Verify both services are healthy:
+It automatically generates a baseline set of basic auth credentials (`admin` / `password`).
 
 ```bash
-docker compose ps
-curl -s http://localhost:8501/healthz   # Streamlit health
-curl -s http://localhost:8000/api/v1/heartbeat   # ChromaDB health (v1)
-curl -s http://localhost:8000/api/v2/heartbeat   # ChromaDB health (v2)
+./startup.sh
 ```
 
-**Ubuntu (Standard):**
-```bash
-sudo docker compose ps
-curl -s http://localhost:8501/healthz
-curl -s http://localhost:8000/api/v2/heartbeat
-```
+Access the dashboard at **http://localhost**
 
----
-
-### Step 3 — Initialize the database
-
-```bash
-docker exec biotech-app python -c "from src.db.models import init_db; init_db(); print('DB OK')"
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker exec biotech-app python3 -c "from src.db.models import init_db; init_db(); print('DB OK')"
-```
-
-Expected output: `DB OK`
-
-Verify the schema (25 tables):
-
-```bash
-docker exec biotech-app sqlite3 /app/biotech_tracker.db ".tables"
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker exec biotech-app sqlite3 /app/biotech_tracker.db ".tables"
-```
-
----
-
-### Step 4 — Initialize ChromaDB collections
-
-> **Skip this step on development machines without a GPU.** ChromaDB embedding requires Ollama with the embedding model pulled. The system degrades gracefully — all other features work without it.
-
-```bash
-# On R730 (GPU server) only
-docker compose --profile gpu up -d ollama-gpu0 ollama-gpu1
-
-# Pull required models (one-time, ~15 GB total)
-docker exec ollama-gpu0 ollama pull mxbai-embed-large:latest
-docker exec ollama-gpu0 ollama pull llama3.1:8b
-docker exec ollama-gpu1 ollama pull deepseek-r1:7b-q4_K_M
-docker exec ollama-gpu1 ollama pull llama3.2:3b
-
-# Create the three ChromaDB collections
-docker exec -e PYTHONPATH=/app biotech-app python scripts/init_chromadb.py
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker compose --profile gpu up -d ollama-gpu0 ollama-gpu1
-sudo docker exec ollama-gpu0 ollama pull mxbai-embed-large
-sudo docker exec -e PYTHONPATH=/app biotech-app python3 scripts/init_chromadb.py
-```
-
-Expected output:
-```
-Created collection: sec_filings
-Created collection: trial_protocols
-Created collection: agent_memos
-ChromaDB initialized.
-```
-
----
-
-### Step 5 — Load the company watchlist
-
-The system ships with 1,391 pre-curated biotech/biopharma tickers in `data/companies.csv`.
-
-```bash
-docker exec -e PYTHONPATH=/app biotech-app python scripts/load_companies.py
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker exec -e PYTHONPATH=/app biotech-app python3 scripts/load_companies.py
-```
-
-Expected output: `Loaded 1391 companies from companies.csv`
-
-Verify the import:
-
-```bash
-docker exec biotech-app sqlite3 /app/biotech_tracker.db \
-  "SELECT COUNT(*) FROM companies WHERE is_active = 1;"
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker exec biotech-app sqlite3 /app/biotech_tracker.db \
-  "SELECT COUNT(*) FROM companies WHERE is_active = 1;"
-```
-
----
-
-### Step 6 — Run the smoke test
-
-Verify CrewAI scaffolding and all 10 agent imports (uses a mock LLM if Ollama is not available):
-
-```bash
-docker exec biotech-app python scripts/hello_world_crew.py
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker exec biotech-app python3 scripts/hello_world_crew.py
-```
-
-Expected output:
-```
-[PASS] Smoke test completed successfully.
-```
-
----
-
-### Step 7 — Run the unit test suite
-
-All unit tests run without GPU, Ollama, or ChromaDB:
-
-```bash
-# Install test dependencies (if running outside Docker)
-pip install -r requirements.txt
-
-# Unit tests: 21 tool tests (all platforms)
-pytest tests/test_tools.py -v
-
-# Scoring formula tests: BAS, Kelly, floor price, etc. (all platforms)
-pytest tests/test_agents.py -v
-
-# Mock-mode crew smoke tests: 10 agents + 3 crews (all platforms)
-pytest tests/test_crews.py -v
-
-# Run all non-integration tests at once
-pytest tests/test_tools.py tests/test_agents.py tests/test_crews.py -v
-```
-
-**Ubuntu (Host side):**
-```bash
-python3 -m pip install -r requirements.txt
-python3 -m pytest tests/test_tools.py tests/test_agents.py tests/test_crews.py -v
-```
-
-Expected: all tests pass on ThinkPad/dev machine without GPU.
-
----
-
-### Step 8 — Onboard your first ticker
-
-The 7-step onboarding pipeline fetches real data from SEC EDGAR and ClinicalTrials.gov.
-
-```bash
-# Single ticker (GPU required for LLM extraction; falls back to regex if unavailable)
-docker exec -e PYTHONPATH=/app biotech-app python scripts/onboard_company.py MRNA
-
-# Multiple tickers in one call
-docker exec -e PYTHONPATH=/app biotech-app python scripts/onboard_company.py BIIB MRNA CRSP
-
-# Process all PENDING/STALE tickers in the database
-docker exec -e PYTHONPATH=/app biotech-app python scripts/onboard_company.py
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker exec -e PYTHONPATH=/app biotech-app python3 scripts/onboard_company.py MRNA
-```
-
-The 7 steps:
-1. Validates the ticker via yfinance (exchange, sector, market cap, cash)
-2. Fetches the latest 10-K from SEC EDGAR
-3. Embeds the strictly pruned 10-K sections (Items 1, 1A, 7) into ChromaDB (512-token chunks; GPU required)
-4. Extracts drug names, NCT IDs, and financial data via Ollama llama3.1:8b
-5. Upserts results into SQLite (companies, interventions, sec_filings)
-6. Links clinical trials via 4-pass CT.gov lookup (NCT IDs → drug names → sponsor → entity aliases)
-7. Queries FDA Orange/Purple Book and orphan drug database
-
-Output is written to `output/onboarding/MRNA_YYYYMMDD.json`. Check the result:
-
-```bash
-# View the audit JSON
-cat output/onboarding/MRNA_$(date +%Y%m%d).json
-
-# Spot-check the database
-docker exec biotech-app sqlite3 /app/biotech_tracker.db \
-  "SELECT ticker, onboarding_status, company_name, total_cash_usd, runway_months \
-   FROM companies WHERE ticker = 'MRNA';"
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-cat output/onboarding/MRNA_$(date +%Y%m%d).json
-sudo docker exec biotech-app sqlite3 /app/biotech_tracker.db \
-  "SELECT ticker, company_name FROM companies WHERE ticker = 'MRNA';"
-```
-
-```bash
-docker exec biotech-app sqlite3 /app/biotech_tracker.db \
-  "SELECT nct_id, relationship_type FROM trial_pipeline WHERE ticker = 'MRNA';"
-```
-
----
-
-### Step 9 — Start the full stack (with Nginx)
-
-For production or external access, start the complete stack including Nginx (port 80):
-
-```bash
-# First: generate a password file for basic auth
-docker run --rm -it httpd:alpine htpasswd -Bbn youruser yourpassword > nginx/.htpasswd
-
-# Start everything
-docker compose up -d
-
-# Verify all services
-docker compose ps
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker compose up -d
-sudo docker compose ps
-```
-
-Services running:
-- **nginx** — reverse proxy on http://localhost (port 80)
-- **biotech-app** — Streamlit on http://localhost:8501 (also accessible via Nginx)
-- **scheduler** — APScheduler (all ingestion + crew jobs)
-- **chromadb** — vector store on http://localhost:8000
-
-Access the dashboard: **http://localhost** (credentials from `.htpasswd`)
-
-For local-only access (no auth needed), comment out the `auth_basic` lines in `nginx/nginx.conf`.
-
----
-
-### Step 10 — Start the nightly scheduler
-
-```bash
-docker compose up -d scheduler
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker compose up -d scheduler
-```
-
-The scheduler runs all ingestion and agent jobs automatically:
-
-| Time (UTC) | Job | Description |
-|---|---|---|
-| Every 4h | `fetch_news` | RSS feeds (BioPharma Dive, Fierce Pharma, Endpoints, STAT News) |
-| 02:00 | `fetch_aact` | AACT clinical trial bulk CSV download |
-| 03:00 | `fetch_sec` | SEC EDGAR filings (10-K, 8-K, Form 4) |
-| 05:30 | `fetch_options` | E*TRADE options chains (skips gracefully if no session) |
-| 06:30 | `fetch_market` | yfinance fundamentals + price history |
-| 07:00 | `onboard_pending` | Onboard any PENDING/STALE tickers |
-| **08:00** | **`crew1`** | **Data Collection Crew — all active tickers** |
-| **09:00** | **`crew2`** | **Analysis Crew — all active tickers** |
-| **10:30** | **`crew3`** | **Strategy Crew — all active tickers** |
-| Sun 01:00 | `fetch_fda` | FDA Orange/Purple Book + orphan DB refresh |
-| Sun 02:00 | `prune_news` | Prune news_articles older than 90 days (REQ-091) |
-| Sun 02:30 | `sync_rag` | Sync agent memos → ChromaDB agent_memos collection |
-
-Monitor the scheduler:
-```bash
-docker compose logs -f scheduler
-tail -f output/scheduler_alerts.log   # SLA warnings only (REQ-063)
-```
-
-**Ubuntu (Docker with sudo):**
-```bash
-sudo docker compose logs -f scheduler
-tail -f output/scheduler_alerts.log
-```
+_The scheduler runs all ingestion and agent jobs automatically (fetching data at intervals and triggering strategy agents). Monitor the background jobs via `docker compose logs -f scheduler`._
 
 ---
 
@@ -709,97 +400,36 @@ docker exec biotech-app python scripts/export_table_to_csv.py studies output/aud
 
 ## Project Structure
 
-```
+```text
 agentic-biotech-research/
 ├── src/
-│   ├── agents/          # CrewAI Agent + Task factories (one file per agent)
-│   │   ├── agent_001_detective.py    # Entity resolution (alias → fuzzy → web)
-│   │   ├── agent_002_scout.py        # IPO watch, disease context, M&A
-│   │   ├── agent_003_profiler.py     # TAM, rNPV, management score, kill switch
-│   │   ├── agent_004_peer_reviewer.py  # Science score, endpoint switching
-│   │   ├── agent_005_insider.py      # Form 4 Code P cluster detection
-│   │   ├── agent_006_strategist.py   # BAS formula, 5-strategy checklist, Kelly
-│   │   ├── agent_008_oracle.py       # PDUFA hunt, conference calendar
-│   │   ├── agent_009_volatility.py   # 6-step CSP protocol, floor price
-│   │   ├── agent_010_partnership.py  # BD&L scoring, Tier classification
-│   │   └── agent_011_smart_money.py  # 13G/13D specialist fund tracking
-│   ├── crews/
-│   │   ├── data_collection_crew.py   # Crew 1: Detective + Scout → Oracle
-│   │   ├── analysis_crew.py          # Crew 2: 5 analysis agents
-│   │   └── strategy_crew.py          # Crew 3: Volatility → Strategist + run_full_analysis()
-│   ├── tools/           # Shared CrewAI tools
-│   │   ├── db_tool.py               # DatabaseQuery/Write/Patch tools
-│   │   ├── local_rag_tool.py        # ChromaDB read/write
-│   │   ├── sec_edgar_tool.py        # SEC EDGAR fetcher
-│   │   ├── clinical_trials_tool.py  # CT.gov API v2 wrapper
-│   │   ├── google_search_tool.py    # DuckDuckGo / Google CSE
-│   │   ├── options_chain_tool.py    # E*TRADE + yfinance fallback
-│   │   └── ollama_tool.py           # Direct Ollama LLM calls
-│   └── db/
-│       ├── models.py        # SQLModel table definitions (source of truth, 25 tables)
-│       └── data_manager.py  # REQ-004-compliant upsert helpers
-│
-├── ingestion/           # Nightly data fetchers (one script per source)
-│   ├── fetch_market_data.py        # yfinance: prices, fundamentals
-│   ├── fetch_aact_csvs.py          # AACT bulk CSV → SQLite (6 tables)
-│   ├── fetch_sec_filings.py        # SEC EDGAR: 10-K, 8-K, Form 4
-│   ├── fetch_options.py            # E*TRADE options chains
-│   ├── fetch_clinical_trials.py    # On-demand CT.gov API v2 wrapper
-│   ├── fetch_fda_data.py           # Orange/Purple Book + orphan DB
-│   └── fetch_news.py               # RSS feeds + pruning
+│   ├── agents/          # CrewAI Agent + Task factories
+│   ├── crews/           # Execution crews (Data Collection, Analysis, Strategy)
+│   ├── tools/           # Shared CrewAI tools (DB query, RAG, SEC fetching)
+│   └── db/              # SQLModel schema and data manager
 │
 ├── scripts/
-│   ├── scheduler.py         # APScheduler — all ingestion + crew jobs
-│   ├── onboard_company.py   # 7-step ticker-first onboarding pipeline
-│   ├── init_chromadb.py     # Create ChromaDB collections (run once)
-│   ├── sync_local_rag.py    # Weekly: embed agent memos → ChromaDB
+│   ├── init_chromadb.py     # Create ChromaDB collections
 │   ├── load_companies.py    # Bulk-import companies.csv into DB
-│   ├── hello_world_crew.py  # Smoke test (mock + live mode)
-│   ├── export_table_to_csv.py # Export any DB table to CSV for audit
-│   └── EtradePythonClient/  # E*TRADE OAuth1 reference implementation
+│   └── hello_world_crew.py  # Smoke test (mock + live mode)
 │
-├── app/
-│   ├── main.py              # Streamlit entry point, routing, keyboard shortcuts
-│   ├── queries.py           # SQLModel read helpers for UI (15 functions)
-│   ├── pages/
-│   │   ├── page1_timeline.py    # Catalyst Timeline: HUD, Gantt, signals, CSP
-│   │   └── page2_workspace.py   # Analyst Workspace: memo, trials, RAG chat
-│   └── components/
-│       ├── gantt.py             # Plotly timeline chart
-│       ├── signals_feed.py      # 48h agent signals sidebar
-│       ├── rag_panel.py         # ChromaDB + Ollama chat panel
-│       └── csp_workbench.py     # CSP options overlay + conflict detection
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── DATAFLOW.md
+│   ├── SCHEMA.md
+│   └── CREWAI_TOOLS.md
 │
 ├── config/
-│   └── strategy_config.json  # REQ-018: all strategy thresholds
-│
-├── nginx/
-│   ├── nginx.conf           # Reverse proxy: port 80 → biotech-app:8501
-│   └── .htpasswd            # Basic auth (generate with htpasswd — not committed)
+│   └── strategy_config.json  # Strategy thresholds
 │
 ├── data/
-│   ├── companies.csv        # 1,391 pre-curated biotech tickers
-│   ├── gbd_2019_clean.csv   # GBD 2019 disease prevalence (Scout fallback)
-│   └── endpoint_synonyms.csv  # Endpoint normalization (Peer Reviewer)
+│   └── companies.csv         # Pre-curated biotech tickers
 │
-├── output/                  # Agent output JSON files (bind-mounted to host)
-│   ├── onboarding/          # output/onboarding/{TICKER}_{YYYYMMDD}.json
-│   ├── data_collection_crew/
-│   ├── analysis_crew/
-│   ├── strategy_crew/
-│   ├── full_analysis/
-│   └── scheduler_alerts.log # SLA warnings (REQ-063)
-│
-├── tests/
-│   ├── test_tools.py        # 21 unit tests — tool contracts, REQ-004 (no GPU)
-│   ├── test_agents.py       # 27 unit tests — BAS, Kelly, floor price (no GPU)
-│   ├── test_crews.py        # 20 smoke tests — agent/crew instantiation (no GPU)
-│   └── test_integration.py  # 13 E2E tests — BIIB/MRNA/CRSP (R730 + Ollama)
-│
-├── docs/                    # Architecture and API documentation
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
+├── pyproject.toml
+├── setup.py
 └── .env.example
 ```
 
@@ -812,8 +442,7 @@ agentic-biotech-research/
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture, deployment diagram, onboarding pipeline |
 | [docs/DATAFLOW.md](docs/DATAFLOW.md) | Data flow per phase (ingestion → agents → UI) |
 | [docs/SCHEMA.md](docs/SCHEMA.md) | Complete SQLite schema — authoritative variable reference |
-| [docs/CREWAI_TOOLS.md](docs/CREWAI_TOOLS.md) | Tool specifications, agent-tool matrix, REQ-004 compliance |
-| [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) | 12-week phased implementation plan + completion status |
+| [docs/CREWAI_TOOLS.md](docs/CREWAI_TOOLS.md) | Tool specifications, agent-tool matrix |
 
 ---
 
@@ -835,7 +464,8 @@ All thresholds are configurable in `config/strategy_config.json`.
 
 **`onboard_company.py` fails at Step 2 (no 10-K found)**
 - Check `SEC_USER_AGENT` is set in `.env` — EDGAR blocks requests without a valid User-Agent
-- Some small-cap tickers file as foreign private issuers (20-F, not 10-K) — the pipeline logs this and skips gracefully
+- The pipeline now tries 10-K → 20-F → S-1/F-1 in order. If the ticker is missing from the SEC static `company_tickers.json`, it falls back to a browse-edgar HTML lookup. Tickers with suffixes like `^F13` or `=` are automatically stripped to the base symbol before retry.
+- If Step 2 still fails, the ticker may be too new (pre-IPO) or delisted with no SEC filings.
 
 **Crew fails with `connection refused` to Ollama**
 - Ollama is a GPU-only service — it does not start in default Docker Compose mode
@@ -844,8 +474,15 @@ All thresholds are configurable in `config/strategy_config.json`.
 - On ThinkPad: agents fall back to mock/regex mode; no investment memos are generated
 
 **ChromaDB embedding times out**
-- `mxbai-embed-large:latest` must be pulled on the same Ollama instance as the embed request
-- Check: `docker exec ollama-gpu0 ollama list`
+- The pipeline pre-computes embeddings by calling Ollama's `/api/embed` endpoint directly with a 120s timeout, then upserts vectors to ChromaDB. This bypasses the ChromaDB `OllamaEmbeddingFunction` which has a very short default httpx timeout (~5s) that fails under GPU contention.
+- If embeddings still time out, the GPUs may have lost CUDA acceleration (see below).
+- Verify the embedding model is available: `docker exec ollama-gpu0 ollama list`
+
+**Ollama running on CPU instead of GPU (all LLM/embed calls extremely slow)**
+- Symptoms: Step 3 and Step 4 consistently time out; `nvidia-smi` on the host shows 0% GPU utilization while Ollama is active.
+- Cause: The Ollama containers occasionally lose CUDA device detection after host reboots or driver updates. Check with: `docker logs ollama-gpu0 2>&1 | grep -i cuda`
+- If you see `ggml_cuda_init: failed to initialize CUDA`, restart the containers: `docker restart ollama-gpu0 ollama-gpu1`
+- Verify GPU is active: `nvidia-smi` should show memory usage (e.g., ~800 MiB per GPU) and >0% utilization.
 
 **`ImportError: No module named 'plotly'`**
 - The Gantt chart requires plotly: `pip install plotly pandas` or rebuild the Docker image

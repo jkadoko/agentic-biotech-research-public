@@ -1,8 +1,8 @@
 # Biotech Investment Analyzer — Database Schema & Variable Reference
 
 **Version:** 3.5t
-**Last Updated:** 2026-04-11
-**Aligned with:** PRD v3.5z, CREWAI_TOOLS.md v2.1
+**Last Updated:** 2026-04-12
+**Aligned with:** PRD v3.5z, CREWAI_TOOLS.md v2.2
 **Supersedes:** SCHEMA.md v16.5 (legacy 23-agent schema)
 
 All tables reside in a single SQLite WAL-mode database: `biotech_tracker.db`.
@@ -61,11 +61,11 @@ The canonical SQL definitions live in `src/db/models.py` (SQLModel).
 | Column | Type | Source |
 |--------|------|--------|
 | `ticker` | TEXT | FK → companies |
-| `date` | DATE | yfinance |
+| `date` | DATE | yfinance | SQL column name. Python/SQLModel field: `price_date` (mapped via `sa_column_kwargs={"name": "date"}`). Agents writing via DatabaseWriteTool must use `"date"` as the key. |
 | `open`, `high`, `low`, `close` | REAL | yfinance |
 | `volume` | INTEGER | yfinance |
 
-**PK:** `(ticker, date)`
+**PK:** `(ticker, date)` — use `"date"` key in DatabaseWriteTool data dict (not `"price_date"`)
 
 ---
 

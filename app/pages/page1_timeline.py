@@ -119,6 +119,7 @@ def render_page1():
             "Gantt Timeline (T)",
             key="_p1_gantt_jump",
             help="Scroll to the Catalyst Timeline view",
+            use_container_width=True,
         ):
             st.markdown(
                 '<script>document.getElementById("gantt_anchor").scrollIntoView({behavior: "smooth"})</script>',
@@ -128,6 +129,7 @@ def render_page1():
             "News Feed (N)",
             key="_p1_news_jump",
             help="Scroll to the News Headlines view",
+            use_container_width=True,
         ):
             st.markdown(
                 '<script>document.getElementById("news_anchor").scrollIntoView({behavior: "smooth"})</script>',
@@ -148,7 +150,9 @@ def render_page1():
             delta=None,
         )
         if neg_ev > 0:
-            tickers_str = ", ".join(html.escape(str(t)) for t in summary["negative_ev_tickers"][:5])
+            tickers_str = ", ".join(
+                html.escape(str(t)) for t in summary["negative_ev_tickers"][:5]
+            )
             st.markdown(
                 f'<span class="neg-ev-badge">NEG EV: {tickers_str}</span>',
                 unsafe_allow_html=True,

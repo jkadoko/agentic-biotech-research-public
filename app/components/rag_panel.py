@@ -32,6 +32,7 @@ def _call_ollama(prompt: str) -> str:
         )
     except Exception as exc:
         import logging
+
         logging.exception("Ollama call failed")
         return "⚠️ I couldn't connect to the local AI model (Ollama). Please ensure the Ollama service is running and try your question again."
 
@@ -62,7 +63,9 @@ def render_rag_panel(ticker: str) -> None:
             st.markdown(msg["content"])
 
     if not collection:
-        st.info("👆 Please select a knowledge base collection to start asking questions.")
+        st.info(
+            "👆 Please select a knowledge base collection to start asking questions."
+        )
 
     # Input
     user_input = st.chat_input(
@@ -134,6 +137,11 @@ def render_rag_panel(ticker: str) -> None:
 
     # Clear button
     if st.session_state[history_key]:
-        if st.button("Clear chat", key=f"_rag_clear_{ticker}"):
+        if st.button(
+            "Clear chat",
+            key=f"_rag_clear_{ticker}",
+            help="Clear chat history",
+            use_container_width=True,
+        ):
             st.session_state[history_key] = []
             st.rerun()

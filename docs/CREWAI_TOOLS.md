@@ -1,7 +1,7 @@
 # CrewAI Shared Tools Catalog
 
 **Version:** 2.2
-**Last Updated:** 2026-04-11
+**Last Updated:** 2026-04-12
 **Aligned with:** PRD v3.5z
 **Purpose:** Documents every shared tool available to CrewAI agents. Each tool is a Python class that implements the CrewAI `BaseTool` interface. Agents declare which tools they use in their `tools` list parameter.
 
@@ -137,6 +137,8 @@ PRIMARY_KEY_MAP: dict = {
     "design_outcomes":            ["nct_id", "outcome_type", "measure"], # PK: (nct_id, outcome_type, measure)
     # Supporting tables
     "orphan":                     ["ticker", "drug_name"],               # PK: (ticker, drug_name)
+    "historical_prices":          ["ticker", "date"],                    # PK: (ticker, date) — note: Python field is price_date, SQL column is date
+    "options_chains":             ["ticker", "expiration", "strike", "option_type"], # PK: (ticker, expiration, strike, option_type)
     "sec_filings":                ["ticker", "filing_date", "filing_type"], # PK: (ticker, filing_date, filing_type)
     "company_onboarding_log":     ["ticker", "onboarding_date"],         # PK: (ticker, onboarding_date)
     # SCHEMA.md Section 9: News

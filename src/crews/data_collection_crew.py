@@ -38,6 +38,8 @@ def run_global_data_collection() -> dict:
     Global daily tasks that must run ONCE (not per-ticker):
       - Scout IPO Watch (Task A): scans SEC EDGAR for new S-1 filings — last 7 days
       - Oracle RSS Catalyst Scan: extracts PDUFA/conference catalysts from news articles
+      - Scout Ticker Onboarding Handoff (Task D): marks newly-PENDING tickers as IN_PROGRESS
+        and writes company_onboarding_log rows — runs sequentially AFTER IPO Watch
 
     Called by scheduler BEFORE the per-ticker loop (08:00 UTC, ahead of per-ticker runs).
     Running these per-ticker would cause 1,000+ redundant global news scans daily.
@@ -71,9 +73,9 @@ def run_global_data_collection() -> dict:
         process=Process.sequential,
         verbose=False,
     )
+    handoff_raw = handoff_crew.kickoff()
 
-    result_raw = crew.kickoff()
-    result = {"type": "global", "output": str(result_raw)}
+    result = {"type": "global", "output": str(result_raw), "handoff": str(handoff_raw)}
     write_agent_json_output("data_collection_crew_global", "GLOBAL", result)
     log.info("Crew 1 global tasks complete")
     return result
